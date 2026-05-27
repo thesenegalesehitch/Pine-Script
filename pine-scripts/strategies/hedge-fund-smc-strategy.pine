@@ -1,0 +1,192 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// HEDGE FUND SMC STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Institutional Trend-Following with SMC
+// Platform: TradingView (Pine Script v6)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Institutional strategy combining EMA trend following with Smart Money Concepts.
+// Features multi-timeframe analysis, liquidity sweeps, displacement detection,
+// and trailing stop management.
+//
+// FEATURES:
+// - Multi-timeframe trend bias (H4, H1)
+// - Liquidity sweep detection
+// - Displacement pattern recognition
+// - Trailing stop automation
+// - Daily drawdown protection
+//
+// RISK WARNING:
+// This strategy is for educational purposes. Past performance does not guarantee
+// future results. Always test thoroughly and use proper risk management.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("Hedge Fund SMC Strategy - QuantAlgo", 
+     overlay=true, 
+     initial_capital=10000, 
+     currency=currency.USD,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.05,
+     calc_on_every_tick=true)
+
+show_emas   = input.bool(true, title="Afficher les Moyennes Mobiles (EMA)")
+show_zones  = input.bool(false, title="Afficher les Zones de Couleur (Vert/Rouge)")
+show_labels = input.bool(true, title="Afficher les Étiquettes de Prix (Bulles)")
+
+ema50_len  = 50
+ema200_len = 200
+atr_len    = 14
+adx_len    = 14
+
+ema50  = ta.ema(close, ema50_len)
+ema200 = ta.ema(close, ema200_len)
+atr    = ta.atr(atr_len)
+vol_avg = ta.sma(volume, 20)
+
+[diplus, diminus, adx] = ta.dmi(adx_len, adx_len)
+
+risk_per_trade = 1.0
+max_daily_dd = 5.0
+
+var float daily_start_equity = strategy.initial_capital
+if ta.change(time("D")) != 0
+    daily_start_equity := strategy.equity
+
+daily_dd_pct = ((daily_start_equity - strategy.equity) / daily_start_equity) * 100
+dd_limit_reached = daily_dd_pct >= max_daily_dd
+
+h4_trend = request.security(syminfo.tickerid, "240", close[1] > ta.ema(close[1], 200), gaps=barmerge.gaps_off)
+h1_trend = request.security(syminfo.tickerid, "60", ta.ema(close[1], 50) > ta.ema(close[1], 200), gaps=barmerge.gaps_off)
+
+bullBias = h4_trend and h1_trend
+bearBias = not h4_trend and not h1_trend
+
+sweepLow  = low < ta.lowest(low, 15)[1] and close > open
+sweepHigh = high > ta.highest(high, 15)[1] and close < open
+
+body = math.abs(close - open)
+displacementUp   = close > high[2] and body > atr * 0.8
+displacementDown = close < low[2] and body > atr * 0.8
+
+rangeOK = atr > ta.sma(atr, 20) and volume > vol_avg
+adxOK = adx > 20
+
+hourUTC = hour(time, "UTC")
+dayOfWeek = dayofweek(time)
+
+killzone = (hourUTC >= 7 and hourUTC <= 16) or (hourUTC >= 12 and hourUTC <= 21)
+is_friday_afternoon = dayOfWeek == dayofweek.friday and hourUTC >= 15
+time_ok = killzone and not is_friday_afternoon and not dd_limit_reached
+
+longCond  = sweepLow  and displacementUp   and bullBias and time_ok and rangeOK and adxOK
+shortCond = sweepHigh and displacementDown and bearBias and time_ok and rangeOK and adxOK
+
+sl_mult  = 2.0 
+tp1_mult = 1.5 
+tp2_mult = 4.0 
+
+var float stop_loss = na
+var float tp1_price = na
+var float tp2_price = na
+
+if longCond and strategy.position_size == 0
+    risk_amount = strategy.equity * (risk_per_trade / 100)
+    sl_dist = atr * sl_mult
+    trade_qty = risk_amount / (sl_dist * syminfo.pointvalue)
+    
+    strategy.entry("LONG", strategy.long, qty=trade_qty)
+    stop_loss := close - sl_dist
+    tp1_price := close + (atr * tp1_mult)
+    tp2_price := close + (atr * tp2_mult)
+
+if shortCond and strategy.position_size == 0
+    risk_amount = strategy.equity * (risk_per_trade / 100)
+    sl_dist = atr * sl_mult
+    trade_qty = risk_amount / (sl_dist * syminfo.pointvalue)
+    
+    strategy.entry("SHORT", strategy.short, qty=trade_qty)
+    stop_loss := close + sl_dist
+    tp1_price := close - (atr * tp1_mult)
+    tp2_price := close - (atr * tp2_mult)
+
+if strategy.position_size > 0
+    if high > tp1_price
+        stop_loss := math.max(stop_loss, low - (atr * 1.0))
+        
+if strategy.position_size < 0
+    if low < tp1_price
+        stop_loss := math.min(stop_loss, high + (atr * 1.0))
+
+if strategy.position_size > 0
+    strategy.exit("TP1 L", "LONG", qty_percent=50, limit=tp1_price, stop=stop_loss)
+    strategy.exit("TP2 L", "LONG", limit=tp2_price, stop=stop_loss)
+
+if strategy.position_size < 0
+    strategy.exit("TP1 S", "SHORT", qty_percent=50, limit=tp1_price, stop=stop_loss)
+    strategy.exit("TP2 S", "SHORT", limit=tp2_price, stop=stop_loss)
+
+if strategy.position_size == 0
+    stop_loss := na
+    tp1_price := na
+    tp2_price := na
+
+plot(show_emas ? ema50 : na,  "EMA 50",  color=color.orange, linewidth=1)
+plot(show_emas ? ema200 : na, "EMA 200", color=color.gray,   linewidth=2)
+
+in_trade = strategy.position_size != 0
+entry_p = in_trade ? strategy.position_avg_price : na
+
+p_entry = plot(entry_p, "Prix d'Entrée", color=color.new(color.blue, 0), style=plot.style_linebr, linewidth=2)
+p_tp1 = plot(in_trade ? tp1_price : na, "TP1 (50%)", color=color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+p_tp2 = plot(in_trade ? tp2_price : na, "TP2 (Max)", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+p_sl = plot(in_trade ? stop_loss : na, "Stop Loss Dynamique", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+
+fill(p_entry, p_tp2, color=show_zones ? color.new(color.green, 95) : na, title="Zone de Profit Max")
+fill(p_entry, p_sl, color=show_zones ? color.new(color.red, 95) : na, title="Zone de Risque")
+
+if show_labels and longCond and strategy.position_size == 0
+    label.new(bar_index, low, 
+         "📈 LONG (Achat 1%)\n" + 
+         "Entrée: " + str.tostring(close, "#.#####") + "\n" + 
+         "SL: " + str.tostring(close - (atr * sl_mult), "#.#####") + "\n" + 
+         "TP1: " + str.tostring(close + (atr * tp1_mult), "#.#####") + "\n" + 
+         "TP2: " + str.tostring(close + (atr * tp2_mult), "#.#####"), 
+         color=color.green, textcolor=color.white, style=label.style_label_up)
+
+if show_labels and shortCond and strategy.position_size == 0
+    label.new(bar_index, high, 
+         "📉 SHORT (Vente 1%)\n" + 
+         "Entrée: " + str.tostring(close, "#.#####") + "\n" + 
+         "SL: " + str.tostring(close + (atr * sl_mult), "#.#####") + "\n" + 
+         "TP1: " + str.tostring(close - (atr * tp1_mult), "#.#####") + "\n" + 
+         "TP2: " + str.tostring(close - (atr * tp2_mult), "#.#####"), 
+         color=color.red, textcolor=color.white, style=label.style_label_down)
+
+plotshape(longCond and strategy.position_size == 0,  "SIGNAL LONG",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortCond and strategy.position_size == 0, "SIGNAL SHORT", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small)
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "Tendance", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, bullBias ? "HAUSSIÈRE 📈" : bearBias ? "BAISSIÈRE 📉" : "NEUTRE ➖", bgcolor=bullBias ? color.new(color.green, 20) : bearBias ? color.new(color.red, 20) : color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 1, "Filtre ADX (Tendance)", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, adxOK ? "ACTIF (Autorisé)" : "RANGING (Bloqué)", bgcolor=adxOK ? color.new(color.green, 20) : color.new(color.orange, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Drawdown Journalier", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(daily_dd_pct, "#.##") + "% / " + str.tostring(max_daily_dd) + "%", bgcolor=dd_limit_reached ? color.new(color.red, 20) : color.new(color.green, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Position (1% Risque)", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, strategy.position_size > 0 ? "ACHAT (LONG)" : strategy.position_size < 0 ? "VENTE (SHORT)" : "AUCUNE", bgcolor=strategy.position_size > 0 ? color.new(color.green, 20) : strategy.position_size < 0 ? color.new(color.red, 20) : color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "Stop Loss Suiveur", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, in_trade ? str.tostring(stop_loss, "#.#####") : "-", bgcolor=color.new(color.red, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Objectifs (TP1 & TP2)", bgcolor=color.new(color.gray, 50), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, in_trade ? "TP1: " + str.tostring(tp1_price, "#.#####") + " | TP2: " + str.tostring(tp2_price, "#.#####") : "-", bgcolor=color.new(color.green, 20), text_color=color.white, text_size=size.small)
+
+

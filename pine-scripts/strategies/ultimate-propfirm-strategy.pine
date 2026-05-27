@@ -1,0 +1,419 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// ULTIMATE PROPFIRM STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Complete PropFirm Solution with Advanced Visuals
+// Platform: TradingView (Pine Script v6)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Complete prop firm strategy with advanced SMC patterns, detailed visual labels,
+// and comprehensive risk management. Features EMA stack alignment, FVG detection,
+// and session filtering.
+//
+// FEATURES:
+// - Advanced SMC patterns (BOS, FVG, OB)
+// - EMA stack alignment
+// - Detailed entry/SL/TP labels
+// - Session filtering
+// - Risk management
+//
+// RISK WARNING:
+// This strategy is for educational purposes. Past performance does not guarantee
+// future results. Always test thoroughly and use proper risk management.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy(
+     "Ultimate PropFirm Strategy - QuantAlgo",
+     overlay = true,
+     initial_capital = 1000,
+     currency = currency.USD,
+     default_qty_type = strategy.cash
+)
+ 
+// ==========================================
+// CONFIGURATION COMPTE & PROPFIRM
+// ==========================================
+grp_prop     = "🛡️ PROTECTION PROPFIRM"
+
+dailyLossMax = input.float(20.0, "Perte Max Jour ($)", group = grp_prop)
+riskPct      = input.float(0.5, "Risque % par trade", group = grp_prop) / 100
+maxTradesDay = input.int(6, "Max Trades / Jour", group = grp_prop)
+
+// ==========================================
+// INDICATEURS
+// ==========================================
+grp_smc  = "🏗️ STRUCTURE SMC"
+
+bosLen   = input.int(10, "BOS Lookback", group = grp_smc)
+
+emaFast  = ta.ema(close, 9)
+emaMid   = ta.ema(close, 21)
+emaSlow  = ta.ema(close, 50)
+emaTrend = ta.ema(close, 200)
+
+atrValue = ta.atr(14)
+avgVol   = ta.sma(volume, 5)
+
+// ==========================================
+// CONFIRMATIONS
+// ==========================================
+grp_conf     = "📊 CONFIRMATIONS"
+
+volMult      = input.float(1.2, "Volume Spike Mult", group = grp_conf)
+useSessions  = input.bool(true, "Filtrer par Sessions", group = grp_conf)
+sessionInput = input.session("0700-1700", "Heures de Trading", group = grp_conf)
+
+// ==========================================
+// LOGIQUE SMC
+// ==========================================
+highBOS = ta.highest(high[1], bosLen)
+lowBOS  = ta.lowest(low[1], bosLen)
+
+bullBOS = ta.crossover(close, highBOS)
+bearBOS = ta.crossunder(close, lowBOS)
+
+bullFVG = low[1] > high[3]
+bearFVG = high[1] < low[3]
+
+bullOB = close[2] < open[2] and close[1] > open[1] and close[1] > high[2]
+bearOB = close[2] > open[2] and close[1] < open[1] and close[1] < low[2]
+
+volSpike = volume > avgVol * volMult
+
+bool isInSession = not useSessions or not na(time(timeframe.period, sessionInput))
+
+// ==========================================
+// SCORE
+// ==========================================
+int bullScore = 0
+int bearScore = 0
+
+bullScore += bullBOS ? 3 : 0
+bullScore += emaFast > emaMid and emaMid > emaSlow and emaSlow > emaTrend ? 2 : 0
+bullScore += bullFVG ? 2 : 0
+bullScore += bullOB ? 2 : 0
+bullScore += volSpike ? 1 : 0
+
+bearScore += bearBOS ? 3 : 0
+bearScore += emaFast < emaMid and emaMid < emaSlow and emaSlow < emaTrend ? 2 : 0
+bearScore += bearFVG ? 2 : 0
+bearScore += bearOB ? 2 : 0
+bearScore += volSpike ? 1 : 0
+
+bool buySignal  = bullScore >= 5 and isInSession
+bool sellSignal = bearScore >= 5 and isInSession
+
+// ==========================================
+// GESTION RISQUE
+// ==========================================
+var float dayStartEquity = strategy.equity
+var int tradesToday = 0
+
+newDay = ta.change(time("D")) != 0
+
+if newDay
+    dayStartEquity := strategy.equity
+    tradesToday := 0
+
+currentDailyPnL = strategy.equity - dayStartEquity
+
+bool canTrade = currentDailyPnL > -dailyLossMax and tradesToday < maxTradesDay
+
+// ==========================================
+// EXECUTION
+// ==========================================
+if canTrade and strategy.position_size == 0
+
+    slDist  = atrValue * 1.5
+    riskAmt = strategy.equity * riskPct
+
+    qty = slDist > 0 ? riskAmt / slDist : 0
+
+    // BUY
+    if buySignal
+
+        buySL = close - slDist
+        buyTP = close + (slDist * 2.0)
+
+        strategy.entry(
+             id = "V9 Buy",
+             direction = strategy.long,
+             qty = qty
+        )
+
+        strategy.exit(
+             id = "Exit Buy",
+             from_entry = "V9 Buy",
+             stop = buySL,
+             limit = buyTP,
+             trail_offset = atrValue * 0.7
+        )
+
+        tradesToday += 1
+
+    // SELL
+    if sellSignal
+
+        sellSL = close + slDist
+        sellTP = close - (slDist * 2.0)
+
+        strategy.entry(
+             id = "V9 Sell",
+             direction = strategy.short,
+             qty = qty
+        )
+
+        strategy.exit(
+             id = "Exit Sell",
+             from_entry = "V9 Sell",
+             stop = sellSL,
+             limit = sellTP,
+             trail_offset = atrValue * 0.7
+        )
+
+        tradesToday += 1
+
+// ==========================================
+// VISUELS
+// ==========================================
+plotshape(
+     series = buySignal,
+     title = "BUY",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.green,
+     text = "BUY",
+     textcolor = color.white,
+     size = size.small
+)
+
+plotshape(
+     series = sellSignal,
+     title = "SELL",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.red,
+     text = "SELL",
+     textcolor = color.white,
+     size = size.small
+)
+
+// ==========================================
+// DASHBOARD
+// ==========================================
+var table board = table.new(
+     position.top_right,
+     2,
+     4,
+     bgcolor = color.black,
+     border_width = 1
+)
+
+if barstate.islast
+
+    table.cell(
+         board,
+         0,
+         0,
+         "Daily PnL",
+         text_color = color.white
+    )
+
+    table.cell(
+         board,
+         1,
+         0,
+         str.tostring(currentDailyPnL, "#.##") + "$",
+         text_color = currentDailyPnL >= 0 ? color.green : color.red
+    )
+
+    table.cell(
+         board,
+         0,
+         1,
+         "Status",
+         text_color = color.white
+    )
+
+    table.cell(
+         board,
+         1,
+         1,
+         canTrade ? "LIVE" : "LOCKED",
+         text_color = canTrade ? color.green : color.red
+    )
+
+// ==========================================
+// PLOTS EMA
+// ==========================================
+plot(emaFast, color = color.green, title = "EMA 9")
+plot(emaMid, color = color.orange, title = "EMA 21")
+plot(emaSlow, color = color.blue, title = "EMA 50")
+plot(emaTrend, color = color.purple, title = "EMA 200")
+// ==========================================
+// LABELS DEBUTANT FRIENDLY
+// ==========================================
+
+// Variables globales
+var line entryLine = na
+var line slLine = na
+var line tpLine = na
+
+var label entryLabel = na
+var label slLabel = na
+var label tpLabel = na
+
+// ========= BUY VISUAL =========
+if buySignal and canTrade
+
+    buyEntry = close
+    buySL    = close - (atrValue * 1.5)
+    buyTP    = close + (atrValue * 2.0 * 1.5)
+
+    // Supprime anciens objets
+    line.delete(entryLine)
+    line.delete(slLine)
+    line.delete(tpLine)
+
+    label.delete(entryLabel)
+    label.delete(slLabel)
+    label.delete(tpLabel)
+
+    // ENTRY
+    entryLine := line.new(
+         bar_index,
+         buyEntry,
+         bar_index + 20,
+         buyEntry,
+         width = 2,
+         color = color.blue
+    )
+
+    entryLabel := label.new(
+         bar_index,
+         buyEntry,
+         "🚀 BUY ENTRY\n" + str.tostring(buyEntry, "#.##"),
+         style = label.style_label_up,
+         color = color.blue,
+         textcolor = color.white,
+         size = size.normal
+    )
+
+    // STOP LOSS
+    slLine := line.new(
+         bar_index,
+         buySL,
+         bar_index + 20,
+         buySL,
+         width = 2,
+         color = color.red
+    )
+
+    slLabel := label.new(
+         bar_index,
+         buySL,
+         "🛑 STOP LOSS\n" + str.tostring(buySL, "#.##"),
+         style = label.style_label_down,
+         color = color.red,
+         textcolor = color.white,
+         size = size.normal
+    )
+
+    // TAKE PROFIT
+    tpLine := line.new(
+         bar_index,
+         buyTP,
+         bar_index + 20,
+         buyTP,
+         width = 2,
+         color = color.green
+    )
+
+    tpLabel := label.new(
+         bar_index,
+         buyTP,
+         "🎯 TAKE PROFIT\n" + str.tostring(buyTP, "#.##"),
+         style = label.style_label_up,
+         color = color.green,
+         textcolor = color.white,
+         size = size.normal
+    )
+
+// ========= SELL VISUAL =========
+if sellSignal and canTrade
+
+    sellEntry = close
+    sellSL    = close + (atrValue * 1.5)
+    sellTP    = close - (atrValue * 2.0 * 1.5)
+
+    // Supprime anciens objets
+    line.delete(entryLine)
+    line.delete(slLine)
+    line.delete(tpLine)
+
+    label.delete(entryLabel)
+    label.delete(slLabel)
+    label.delete(tpLabel)
+
+    // ENTRY
+    entryLine := line.new(
+         bar_index,
+         sellEntry,
+         bar_index + 20,
+         sellEntry,
+         width = 2,
+         color = color.orange
+    )
+
+    entryLabel := label.new(
+         bar_index,
+         sellEntry,
+         "🔻 SELL ENTRY\n" + str.tostring(sellEntry, "#.##"),
+         style = label.style_label_down,
+         color = color.orange,
+         textcolor = color.white,
+         size = size.normal
+    )
+
+    // STOP LOSS
+    slLine := line.new(
+         bar_index,
+         sellSL,
+         bar_index + 20,
+         sellSL,
+         width = 2,
+         color = color.red
+    ) 
+
+    slLabel := label.new(
+         bar_index,
+         sellSL,
+         "🛑 STOP LOSS\n" + str.tostring(sellSL, "#.##"),
+         style = label.style_label_up,
+         color = color.red,
+         textcolor = color.white,
+         size = size.normal
+    )
+
+    // TAKE PROFIT
+    tpLine := line.new(
+         bar_index,
+         sellTP,
+         bar_index + 20,
+         sellTP,
+         width = 2,
+         color = color.lime
+    )
+
+    tpLabel := label.new(
+         bar_index,
+         sellTP,
+         "🎯 TAKE PROFIT\n" + str.tostring(sellTP, "#.##"),
+         style = label.style_label_down,
+         color = color.lime,
+         textcolor = color.black,
+         size = size.normal
+    )

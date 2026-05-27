@@ -1,0 +1,60 @@
+//@version=5
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMC STARTER ROBOT
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Educational SMC Basics (No Risk Management)
+// Platform: TradingView (Pine Script v5)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Educational strategy demonstrating basic SMC concepts (BOS + Liquidity).
+// WARNING: This strategy has NO risk management and is for LEARNING ONLY.
+// Do not use for live trading.
+//
+// FEATURES:
+// - Basic Break of Structure detection
+// - Simple liquidity zones
+// - Visual labels
+//
+// ⚠️ EDUCATIONAL ONLY - NO RISK MANAGEMENT - NOT FOR LIVE TRADING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("SMC Starter Robot - QuantAlgo (Educational)", overlay=true)
+
+// 📊 Paramètres
+length = 20
+
+// 🔁 Structure du marché
+highestHigh = ta.highest(high, length)
+lowestLow = ta.lowest(low, length)
+
+// 📈 Break of Structure (BOS)
+bullBOS = ta.crossover(close, highestHigh[1])
+bearBOS = ta.crossunder(close, lowestLow[1])
+
+// 💧 Liquidity zones (simple approximation)
+liqHigh = highestHigh
+liqLow = lowestLow
+
+// 📍 Affichage des zones
+plot(liqHigh, "Liquidity High", color=color.red)
+plot(liqLow, "Liquidity Low", color=color.green)
+
+// 🟢 BUY condition
+buy = bullBOS
+
+// 🔴 SELL condition
+sell = bearBOS
+
+// 📊 Affichage des signaux
+plotshape(buy, title="BUY", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sell, title="SELL", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// 🤖 Entrées stratégie
+if buy
+    strategy.entry("BUY", strategy.long)
+
+if sell
+    strategy.entry("SELL", strategy.short)

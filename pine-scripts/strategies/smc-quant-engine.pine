@@ -1,0 +1,231 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMC QUANT ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Quantitative SMC Engine with Scoring System
+// Platform: TradingView (Pine Script v6)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Quantitative Smart Money Concepts engine with scoring system, institutional
+// filters, and advanced dashboard. Features multi-timeframe analysis and
+// adaptive signal quality assessment.
+//
+// FEATURES:
+// - Scoring system (1-8 quality score)
+// - Institutional filters
+// - SMC pattern detection
+// - Multi-timeframe bias
+// - Session filtering
+// - Advanced dashboard
+//
+// RISK WARNING:
+// This strategy is for educational purposes. Past performance does not guarantee
+// future results. Always test thoroughly and use proper risk management.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("SMC Quant Engine - QuantAlgo", shorttitle="SMC Quant", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.05, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+grp_ui = "Visual Interface (Beginner Friendly)"
+show_emas   = input.bool(true,  title="Show Trend EMAs", group=grp_ui)
+show_fvg    = input.bool(true,  title="Show Fair Value Gaps (FVG)", group=grp_ui)
+show_ob     = input.bool(true,  title="Show Order Blocks (OB)", group=grp_ui)
+show_labels = input.bool(true,  title="Show Entry/SL/TP Labels", group=grp_ui)
+show_zones  = input.bool(false, title="Show Risk/Reward Zones", group=grp_ui)
+show_dash   = input.bool(true,  title="Show Advanced Dashboard", group=grp_ui)
+
+grp_risk = "Risk & Money Management"
+risk_pct    = input.float(1.0, title="Risk Per Trade (%)", step=0.1, group=grp_risk)
+max_dd      = input.float(5.0, title="Max Daily Drawdown (%)", step=0.5, group=grp_risk)
+rr_tp1      = input.float(1.5, title="Risk:Reward TP1", step=0.1, group=grp_risk)
+rr_tp2      = input.float(3.0, title="Risk:Reward TP2", step=0.1, group=grp_risk)
+sl_atr_mult = input.float(1.5, title="SL ATR Multiplier", step=0.1, group=grp_risk)
+
+grp_filter = "Institutional Filters"
+use_session = input.bool(true, title="Use London/NY Session Filter", group=grp_filter)
+min_score   = input.int(5, title="Minimum Quality Score (1-8)", minval=1, maxval=8, group=grp_filter)
+
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+atr    = ta.atr(14)
+vol_avg = ta.sma(volume, 20)
+[diplus, diminus, adx] = ta.dmi(14, 14)
+
+plot(show_emas ? ema50  : na, "EMA 50",  color=color.new(color.blue, 0), linewidth=1)
+plot(show_emas ? ema200 : na, "EMA 200", color=color.new(color.gray, 0), linewidth=2)
+
+htf_ema50  = request.security(syminfo.tickerid, "240", ta.ema(close[1], 50), gaps=barmerge.gaps_off)
+htf_ema200 = request.security(syminfo.tickerid, "240", ta.ema(close[1], 200), gaps=barmerge.gaps_off)
+
+htf_bull = htf_ema50 > htf_ema200
+htf_bear = htf_ema50 < htf_ema200
+
+leftBars  = 5
+rightBars = 5
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low, leftBars, rightBars)
+
+var float recent_ph = na
+var float recent_pl = na
+
+if not na(ph)
+    recent_ph := ph
+if not na(pl)
+    recent_pl := pl
+
+bull_bos = close > recent_ph[1] and close[1] <= recent_ph[1]
+bear_bos = close < recent_pl[1] and close[1] >= recent_pl[1]
+
+bull_sweep = low < recent_pl[1] and close > recent_pl[1]
+bear_sweep = high > recent_ph[1] and close < recent_ph[1]
+
+bull_fvg = low > high[2] and close > open
+bear_fvg = high < low[2] and close < open
+
+if show_fvg and bull_fvg
+    box.new(bar_index[2], high[2], bar_index, low, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 100))
+if show_fvg and bear_fvg
+    box.new(bar_index[2], low[2], bar_index, high, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 100))
+
+body = math.abs(close - open)
+displacementUp   = close > high[1] and body > atr * 1.0 and close > open
+displacementDown = close < low[1] and body > atr * 1.0 and close < open
+
+bull_ob = displacementUp and close[1] < open[1]
+bear_ob = displacementDown and close[1] > open[1]
+
+if show_ob and bull_ob
+    box.new(bar_index[1], high[1], bar_index+3, low[1], bgcolor=color.new(color.blue, 85), border_color=color.new(color.blue, 50))
+if show_ob and bear_ob
+    box.new(bar_index[1], high[1], bar_index+3, low[1], bgcolor=color.new(color.orange, 85), border_color=color.new(color.orange, 50))
+
+vol_spike = volume > vol_avg * 1.2
+adx_trend = adx > 20
+
+hourUTC = hour(time, "UTC")
+session_active = (hourUTC >= 7 and hourUTC <= 21)
+session_ok = use_session ? session_active : true
+
+score_long = 0
+score_long += htf_bull ? 1 : 0
+score_long += bull_sweep ? 2 : 0
+score_long += bull_bos ? 2 : 0
+score_long += bull_fvg ? 1 : 0
+score_long += bull_ob ? 1 : 0
+score_long += vol_spike ? 1 : 0
+
+score_short = 0
+score_short += htf_bear ? 1 : 0
+score_short += bear_sweep ? 2 : 0
+score_short += bear_bos ? 2 : 0
+score_short += bear_fvg ? 1 : 0
+score_short += bear_ob ? 1 : 0
+score_short += vol_spike ? 1 : 0
+
+valid_long  = score_long >= min_score and session_ok and adx_trend
+valid_short = score_short >= min_score and session_ok and adx_trend
+
+var float daily_eq = strategy.initial_capital
+if ta.change(time("D"))
+    daily_eq := strategy.equity
+
+dd_pct = ((daily_eq - strategy.equity) / daily_eq) * 100
+dd_ok = dd_pct < max_dd
+
+var float sl_price = na
+var float tp1_price = na
+var float tp2_price = na
+
+if valid_long and strategy.position_size == 0 and dd_ok
+    sl_dist = atr * sl_atr_mult
+    sl_price := close - sl_dist
+    tp1_price := close + (sl_dist * rr_tp1)
+    tp2_price := close + (sl_dist * rr_tp2)
+    
+    risk_amt = strategy.equity * (risk_pct / 100)
+    qty = risk_amt / sl_dist
+    
+    strategy.entry("LONG", strategy.long, qty=qty)
+    
+if valid_short and strategy.position_size == 0 and dd_ok
+    sl_dist = atr * sl_atr_mult
+    sl_price := close + sl_dist
+    tp1_price := close - (sl_dist * rr_tp1)
+    tp2_price := close - (sl_dist * rr_tp2)
+    
+    risk_amt = strategy.equity * (risk_pct / 100)
+    qty = risk_amt / sl_dist
+    
+    strategy.entry("SHORT", strategy.short, qty=qty)
+
+if strategy.position_size > 0
+    if high > tp1_price
+        sl_price := math.max(sl_price, strategy.position_avg_price)
+    strategy.exit("TP1 L", "LONG", qty_percent=50, limit=tp1_price, stop=sl_price)
+    strategy.exit("TP2 L", "LONG", limit=tp2_price, stop=sl_price)
+
+if strategy.position_size < 0
+    if low < tp1_price
+        sl_price := math.min(sl_price, strategy.position_avg_price)
+    strategy.exit("TP1 S", "SHORT", qty_percent=50, limit=tp1_price, stop=sl_price)
+    strategy.exit("TP2 S", "SHORT", limit=tp2_price, stop=sl_price)
+
+if strategy.position_size == 0
+    sl_price := na
+    tp1_price := na
+    tp2_price := na
+
+in_trade = strategy.position_size != 0
+entry_p = in_trade ? strategy.position_avg_price : na
+
+p_entry = plot(entry_p, "Entry", color=color.new(color.blue, 0), style=plot.style_linebr)
+p_sl    = plot(in_trade ? sl_price : na, "SL", color=color.new(color.red, 0), style=plot.style_linebr)
+p_tp2   = plot(in_trade ? tp2_price : na, "TP2", color=color.new(color.green, 0), style=plot.style_linebr)
+
+fill(p_entry, p_tp2, color=show_zones ? color.new(color.green, 90) : na, title="Profit Zone")
+fill(p_entry, p_sl,  color=show_zones ? color.new(color.red, 90)   : na, title="Risk Zone")
+
+if show_labels and valid_long and strategy.position_size == 0
+    label.new(bar_index, low - atr, "🟢 LONG\nScore: " + str.tostring(score_long) + "\nRisk: " + str.tostring(risk_pct) + "%\n" + "SL: " + str.tostring(close - atr * sl_atr_mult, "#.#####") + "\nTP1: " + str.tostring(close + atr * sl_atr_mult * rr_tp1, "#.#####"), color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up)
+
+if show_labels and valid_short and strategy.position_size == 0
+    label.new(bar_index, high + atr, "🔴 SHORT\nScore: " + str.tostring(score_short) + "\nRisk: " + str.tostring(risk_pct) + "%\n" + "SL: " + str.tostring(close + atr * sl_atr_mult, "#.#####") + "\nTP1: " + str.tostring(close - atr * sl_atr_mult * rr_tp1, "#.#####"), color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down)
+
+var table dash = table.new(position.top_right, 2, 9, border_width=1, border_color=color.new(color.gray, 50))
+if show_dash and barstate.islast
+    table.cell(dash, 0, 0, " ⚡ SMC QUANT ENGINE V6 ", bgcolor=color.new(color.blue, 10), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, "STATUS", bgcolor=color.new(color.blue, 10), text_color=color.white, text_size=size.normal)
+    
+    table.cell(dash, 0, 1, "Macro Bias (H4)", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, htf_bull ? "BULLISH 🟢" : htf_bear ? "BEARISH 🔴" : "NEUTRAL ⚪", bgcolor=htf_bull ? color.new(color.green, 20) : htf_bear ? color.new(color.red, 20) : color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 2, "Volatility (ADX)", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, adx_trend ? "TRENDING 🔥" : "RANGING 💤", bgcolor=adx_trend ? color.new(color.green, 20) : color.new(color.orange, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 3, "Setup Score", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, "L: " + str.tostring(score_long) + " | S: " + str.tostring(score_short) + " / 8", bgcolor=color.new(color.blue, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "Session Filter", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, session_active ? "ACTIVE 🌍" : "CLOSED 🌙", bgcolor=session_active ? color.new(color.green, 20) : color.new(color.red, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 5, "Daily Drawdown", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(dd_pct, "#.##") + "% / " + str.tostring(max_dd) + "%", bgcolor=dd_ok ? color.new(color.green, 20) : color.new(color.red, 20), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 6, "Active Trade", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, strategy.position_size > 0 ? "LONG 📈" : strategy.position_size < 0 ? "SHORT 📉" : "NONE", bgcolor=strategy.position_size > 0 ? color.new(color.green, 20) : strategy.position_size < 0 ? color.new(color.red, 20) : color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Winrate", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    wr = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(dash, 1, 7, str.tostring(wr, "#.##") + "%", bgcolor=color.new(color.blue, 20), text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Profit Factor", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    gross_loss = strategy.grossloss > 0 ? strategy.grossloss : 1
+    pf = strategy.grossprofit / gross_loss
+    table.cell(dash, 1, 8, str.tostring(pf, "#.##"), bgcolor=color.new(color.blue, 20), text_color=color.white, text_size=size.small)
+
+alertcondition(valid_long  and strategy.position_size == 0, title="Long Alert",  message="SMC Quant V6: LONG Signal Detected!")
+alertcondition(valid_short and strategy.position_size == 0, title="Short Alert", message="SMC Quant V6: SHORT Signal Detected!")
+alertcondition(ta.cross(high, tp1_price) or ta.cross(low, tp1_price), title="TP1 Hit Alert", message="SMC Quant V6: TP1 Hit!")
+alertcondition(ta.cross(high, tp2_price) or ta.cross(low, tp2_price), title="TP2 Hit Alert", message="SMC Quant V6: TP2 Hit!")

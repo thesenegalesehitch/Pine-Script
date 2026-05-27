@@ -1,0 +1,394 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// INSTITUTIONAL HFT ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: High-Frequency Trading with Probabilistic Scoring
+// Platform: TradingView (Pine Script v6)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Institutional-grade HFT strategy with probabilistic scoring (0-100), advanced
+// risk management, and Smart Money Concepts (SMC). Features adaptive thresholds,
+// multi-timeframe bias, killzone filtering, and dynamic risk scaling.
+//
+// FEATURES:
+// - Probabilistic scoring engine (0-100)
+// - Institutional risk management
+// - SMC pattern detection (BOS, CHOCH, FVG, OB)
+// - Multi-timeframe analysis (H4, Daily)
+// - Killzone filtering (London, NY)
+// - Dynamic risk scaling
+// - Breakeven & trailing automation
+//
+// RISK WARNING:
+// This strategy is for educational purposes. Past performance does not guarantee
+// future results. Always test thoroughly and use proper risk management.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("Institutional HFT Engine - QuantAlgo", shorttitle="HFT Engine", overlay=true, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.cash, commission_type=strategy.commission.percent, commission_value=0.01, calc_on_every_tick=false, max_boxes_count=200, max_labels_count=200, max_lines_count=200)
+
+// ╔══════════════════════════════════════════════════╗
+// ║       💎 INSTITUTIONAL RISK ENGINE               ║
+// ╚══════════════════════════════════════════════════╝
+grp_risk = "💎 INSTITUTIONAL RISK ENGINE"
+inp_risk_pct     = input.float(1.0, "Base Risk Per Trade (%)", group=grp_risk, step=0.1) / 100
+inp_max_dd_day   = input.float(4.0, "Max Daily Drawdown (%)", group=grp_risk, step=0.5)
+inp_max_losses   = input.int(3, "Max Consec Losses (Pause)", group=grp_risk)
+inp_cooldown     = input.int(5, "Cooldown Bars After Loss", group=grp_risk)
+inp_dynamic_risk = input.bool(true, "Dynamic Risk Scaling (Anti-Drawdown)", group=grp_risk)
+
+// ╔══════════════════════════════════════════════════╗
+// ║       🎯 PROBABILISTIC SCORING ENGINE            ║
+// ╚══════════════════════════════════════════════════╝
+grp_score = "🎯 PROBABILISTIC SCORING ENGINE"
+inp_min_score    = input.float(65.0, "Base Score Threshold (0-100)", group=grp_score)
+inp_strict_mode  = input.bool(true, "Strict Mode (Wait for perfect alignments)", group=grp_score)
+
+// ╔══════════════════════════════════════════════════╗
+// ║       🏗️ SMART MONEY CONCEPTS (SMC)              ║
+// ╚══════════════════════════════════════════════════╝
+grp_smc = "🏗️ SMART MONEY CONCEPTS"
+inp_bos_len      = input.int(7, "Swing / Liquidity Lookback", group=grp_smc, minval=3)
+inp_fvg_min      = input.float(0.5, "FVG Min Size (x ATR)", group=grp_smc, step=0.1)
+
+// ╔══════════════════════════════════════════════════╗
+// ║       ⚡ HFT EXECUTION & TRAILING                ║
+// ╚══════════════════════════════════════════════════╝
+grp_exec = "⚡ HFT EXECUTION"
+inp_tp1_rr       = input.float(1.5, "TP1 Risk/Reward Ratio", group=grp_exec, step=0.1)
+inp_tp2_rr       = input.float(3.0, "TP2 Risk/Reward Ratio", group=grp_exec, step=0.1)
+inp_use_trailing = input.bool(true, "Volatility Trailing on TP2", group=grp_exec)
+inp_be_offset    = input.float(0.2, "Break-Even Offset (x ATR)", group=grp_exec, step=0.1)
+
+// ╔══════════════════════════════════════════════════╗
+// ║       🎨 VISUALS & FILTERS                       ║
+// ╚══════════════════════════════════════════════════╝
+grp_vis = "🎨 VISUALS & FILTERS"
+show_dashboard   = input.bool(true, "Show Godmode Dashboard", group=grp_vis)
+show_labels      = input.bool(true, "Show Entry/Exit Labels", group=grp_vis)
+show_fvg         = input.bool(true, "Show FVG Zones", group=grp_vis)
+show_ob          = input.bool(true, "Show Order Blocks", group=grp_vis)
+use_killzones    = input.bool(true, "Use London & NY Killzones Only", group=grp_vis)
+
+// ==============================================================================
+// 1. INDICATORS & REGIME DETECTION
+// ==============================================================================
+atr_14 = ta.atr(14)
+atr_50 = ta.atr(50)
+volatility_ratio = atr_14 / atr_50
+
+is_compression = volatility_ratio < 0.75
+is_high_vol    = volatility_ratio > 1.5
+vol_avg        = ta.sma(volume, 20)
+is_expansion   = ta.crossover(volatility_ratio, 1.0) and volume > vol_avg * 1.5
+is_vol_spike   = volume > vol_avg * 2.0
+
+[diplus, diminus, adx_val] = ta.dmi(14, 14)
+is_strong_trend = adx_val > 25
+is_ranging      = adx_val < 20
+is_chop         = is_ranging and not is_expansion
+
+// Moving Averages
+ema_fast = ta.ema(close, 9)
+ema_mid  = ta.ema(close, 21)
+ema_slow = ta.ema(close, 50)
+ema_200  = ta.ema(close, 200)
+
+// Multi-Timeframe Bias (No Lookahead)
+htf_ema50  = request.security(syminfo.tickerid, "240", ta.ema(close[1], 50), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htf_ema200 = request.security(syminfo.tickerid, "240", ta.ema(close[1], 200), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+mtf_bull = htf_ema50 > htf_ema200
+mtf_bear = htf_ema50 < htf_ema200
+
+// Killzones
+hourUTC = hour(time, "UTC")
+is_london_kz = (hourUTC >= 7 and hourUTC < 10)
+is_ny_kz     = (hourUTC >= 13 and hourUTC < 16)
+is_active_session = use_killzones ? (is_london_kz or is_ny_kz) : true
+
+// ==============================================================================
+// 2. LIQUIDITY & STRUCTURE ENGINE
+// ==============================================================================
+swHigh = ta.pivothigh(high, inp_bos_len, inp_bos_len)
+swLow  = ta.pivotlow(low, inp_bos_len, inp_bos_len)
+var float rsh = na
+var float rsl = na
+if not na(swHigh)
+    rsh := swHigh
+if not na(swLow)
+    rsl := swLow
+
+// Liquidity Sweep (Fakeout detection: Sweeps low but closes above)
+bullSweep = not na(rsl) and low < rsl and close > rsl
+bearSweep = not na(rsh) and high > rsh and close < rsh
+
+// Structure BOS & CHOCH
+var int market_struct = 0 // 1 Bull, -1 Bear
+bullBOS = not na(rsh) and close > rsh and close[1] <= rsh
+bearBOS = not na(rsl) and close < rsl and close[1] >= rsl
+
+if bullBOS
+    market_struct := 1
+if bearBOS
+    market_struct := -1
+
+bullCHOCH = bullBOS and market_struct[1] == -1
+bearCHOCH = bearBOS and market_struct[1] == 1
+
+// Order Blocks with Displacement
+body_size = math.abs(close - open)
+displaceUp   = close > high[1] and body_size > atr_14 * 0.8 and close > open
+displaceDown = close < low[1] and body_size > atr_14 * 0.8 and close < open
+
+bullOB = displaceUp   and close[1] < open[1]
+bearOB = displaceDown and close[1] > open[1]
+
+// Fair Value Gaps
+bullFVG = low > high[2] and (low - high[2]) > atr_14 * inp_fvg_min
+bearFVG = high < low[2] and (low[2] - high) > atr_14 * inp_fvg_min
+
+// Premium / Discount Zones
+range_mid = (rsh + rsl) / 2
+is_discount = not na(range_mid) and close < range_mid
+is_premium  = not na(range_mid) and close > range_mid
+
+// ==============================================================================
+// 3. GODMODE PROBABILISTIC SCORING (0 to 100)
+// ==============================================================================
+float bullScore = 0.0
+// 1. Context & Trend (Max 25 pts)
+bullScore += mtf_bull ? 15.0 : 0.0
+bullScore += (ema_fast > ema_mid and ema_mid > ema_slow) ? 10.0 : 0.0
+
+// 2. Liquidity Grab / Fakeout (Max 25 pts)
+bullScore += bullSweep ? 25.0 : 0.0
+
+// 3. Structure Quality (Max 20 pts)
+bullScore += bullCHOCH ? 20.0 : (bullBOS ? 10.0 : 0.0)
+bullScore += bullOB ? 10.0 : 0.0 // Bonus if overlaps
+
+// 4. Momentum, Volume & Expansion (Max 15 pts)
+bullScore += is_vol_spike ? 10.0 : 0.0
+bullScore += is_expansion ? 5.0 : 0.0
+
+// 5. Zone Context (Max 15 pts)
+bullScore += bullFVG ? 5.0 : 0.0
+bullScore += is_discount ? 10.0 : 0.0
+
+float bearScore = 0.0
+// 1. Context & Trend (Max 25 pts)
+bearScore += mtf_bear ? 15.0 : 0.0
+bearScore += (ema_fast < ema_mid and ema_mid < ema_slow) ? 10.0 : 0.0
+
+// 2. Liquidity Grab / Fakeout (Max 25 pts)
+bearScore += bearSweep ? 25.0 : 0.0
+
+// 3. Structure Quality (Max 20 pts)
+bearScore += bearCHOCH ? 20.0 : (bearBOS ? 10.0 : 0.0)
+bearScore += bearOB ? 10.0 : 0.0
+
+// 4. Momentum, Volume & Expansion (Max 15 pts)
+bearScore += is_vol_spike ? 10.0 : 0.0
+bearScore += is_expansion ? 5.0 : 0.0
+
+// 5. Zone Context (Max 15 pts)
+bearScore += bearFVG ? 5.0 : 0.0
+bearScore += is_premium ? 10.0 : 0.0
+
+// Adaptive Thresholding
+float adaptive_thresh = inp_min_score
+adaptive_thresh += is_chop ? 15.0 : 0.0       // Demand higher quality in chop
+adaptive_thresh += is_high_vol ? 10.0 : 0.0   // Be careful in erratic markets
+adaptive_thresh -= is_strong_trend ? 10.0 : 0.0 // Easier to enter in strong trend
+adaptive_thresh := math.min(math.max(adaptive_thresh, 40.0), 95.0)
+
+// Signals
+bool buySignal  = bullScore >= adaptive_thresh and is_active_session and not is_chop
+bool sellSignal = bearScore >= adaptive_thresh and is_active_session and not is_chop
+
+if inp_strict_mode
+    buySignal  := buySignal and mtf_bull
+    sellSignal := sellSignal and mtf_bear
+
+// ==============================================================================
+// 4. RISK MANAGEMENT & ACCOUNT PROTECTION
+// ==============================================================================
+var float day_start_equity = strategy.initial_capital
+var int trades_today = 0
+var int consec_losses = 0
+var int bars_since_loss = 0
+var bool is_paused = false
+
+if ta.change(time("D")) != 0
+    day_start_equity := strategy.equity
+    trades_today := 0
+    is_paused := false
+
+float daily_pnl_pct = ((strategy.equity - day_start_equity) / day_start_equity) * 100
+bool dd_limit_hit = daily_pnl_pct <= -inp_max_dd_day
+
+var int prev_closed = 0
+if strategy.closedtrades > prev_closed
+    float ltp = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if ltp < 0
+        consec_losses += 1
+        bars_since_loss := 0
+    else
+        consec_losses := 0
+    prev_closed := strategy.closedtrades
+
+bars_since_loss += 1
+
+if consec_losses >= inp_max_losses
+    is_paused := true
+
+bool can_trade = not dd_limit_hit and not is_paused and (bars_since_loss >= inp_cooldown or consec_losses == 0)
+
+// Dynamic Risk Scaling
+float risk_multiplier = 1.0
+if inp_dynamic_risk
+    risk_multiplier := consec_losses > 1 ? 0.5 : 1.0
+    risk_multiplier := is_high_vol ? risk_multiplier * 0.7 : risk_multiplier
+    risk_multiplier := is_chop ? risk_multiplier * 0.5 : risk_multiplier
+
+// ==============================================================================
+// 5. GODMODE EXECUTION ENGINE
+// ==============================================================================
+var float active_sl = na
+var float active_tp1 = na
+var float active_tp2 = na
+
+float bull_struct_sl = not na(rsl) ? math.min(rsl - atr_14 * 0.2, close - atr_14 * 1.5) : close - atr_14 * 1.5
+float bear_struct_sl = not na(rsh) ? math.max(rsh + atr_14 * 0.2, close + atr_14 * 1.5) : close + atr_14 * 1.5
+
+if buySignal and can_trade and strategy.position_size == 0
+    float sl_dist = math.max(close - bull_struct_sl, atr_14 * 0.5) // Minimum 0.5 ATR SL
+    active_sl := close - sl_dist
+    active_tp1 := close + (sl_dist * inp_tp1_rr)
+    active_tp2 := close + (sl_dist * inp_tp2_rr)
+    
+    float risk_amt = strategy.equity * inp_risk_pct * risk_multiplier
+    float qty = risk_amt / sl_dist
+    
+    strategy.entry("GOD_LONG", strategy.long, qty=qty)
+    strategy.exit("TP1_L", "GOD_LONG", qty_percent=50, limit=active_tp1, stop=active_sl)
+    strategy.exit("TP2_L", "GOD_LONG", limit=active_tp2, stop=active_sl)
+    trades_today += 1
+
+if sellSignal and can_trade and strategy.position_size == 0
+    float sl_dist = math.max(bear_struct_sl - close, atr_14 * 0.5)
+    active_sl := close + sl_dist
+    active_tp1 := close - (sl_dist * inp_tp1_rr)
+    active_tp2 := close - (sl_dist * inp_tp2_rr)
+    
+    float risk_amt = strategy.equity * inp_risk_pct * risk_multiplier
+    float qty = risk_amt / sl_dist
+    
+    strategy.entry("GOD_SHORT", strategy.short, qty=qty)
+    strategy.exit("TP1_S", "GOD_SHORT", qty_percent=50, limit=active_tp1, stop=active_sl)
+    strategy.exit("TP2_S", "GOD_SHORT", limit=active_tp2, stop=active_sl)
+    trades_today += 1
+
+// Break-Even & Trailing Logic
+if strategy.position_size > 0
+    if high >= active_tp1
+        active_sl := math.max(active_sl, strategy.position_avg_price + atr_14 * inp_be_offset)
+    if inp_use_trailing and high >= active_tp1
+        active_sl := math.max(active_sl, close - atr_14 * 2.0)
+    strategy.exit("TP2_L", "GOD_LONG", limit=active_tp2, stop=active_sl)
+
+if strategy.position_size < 0
+    if low <= active_tp1
+        active_sl := math.min(active_sl, strategy.position_avg_price - atr_14 * inp_be_offset)
+    if inp_use_trailing and low <= active_tp1
+        active_sl := math.min(active_sl, close + atr_14 * 2.0)
+    strategy.exit("TP2_S", "GOD_SHORT", limit=active_tp2, stop=active_sl)
+
+if strategy.position_size == 0
+    active_sl := na
+    active_tp1 := na
+    active_tp2 := na
+
+// Emergency Close on Global DD Hit
+if dd_limit_hit and strategy.position_size != 0
+    strategy.close_all(comment="🚨 DD LIMIT HIT CLOSE")
+
+// ==============================================================================
+// 6. VISUALS & DASHBOARD
+// ==============================================================================
+// FVG & OB Plotting
+if show_fvg and bullFVG
+    box.new(bar_index[2], high[2], bar_index, low, bgcolor=color.new(#00E676, 88), border_color=color.new(#00E676, 100))
+if show_fvg and bearFVG
+    box.new(bar_index[2], low[2], bar_index, high, bgcolor=color.new(#FF5252, 88), border_color=color.new(#FF5252, 100))
+if show_ob and bullOB
+    box.new(bar_index[1], high[1], bar_index + 3, low[1], bgcolor=color.new(#2196F3, 85), border_color=color.new(#2196F3, 50))
+if show_ob and bearOB
+    box.new(bar_index[1], high[1], bar_index + 3, low[1], bgcolor=color.new(#FF9800, 85), border_color=color.new(#FF9800, 50))
+
+// Labels
+if show_labels and buySignal and can_trade and strategy.position_size == 0
+    label.new(bar_index, low - atr_14, "⚡ GOD LONG\nScore: " + str.tostring(bullScore, "#") + "\nRisk: " + str.tostring(risk_multiplier*100, "#") + "%", color=color.new(#00E676, 10), textcolor=color.white, style=label.style_label_up)
+if show_labels and sellSignal and can_trade and strategy.position_size == 0
+    label.new(bar_index, high + atr_14, "⚡ GOD SHORT\nScore: " + str.tostring(bearScore, "#") + "\nRisk: " + str.tostring(risk_multiplier*100, "#") + "%", color=color.new(#FF5252, 10), textcolor=color.white, style=label.style_label_down)
+
+// Dashboard
+if show_dashboard and barstate.islast
+    var table dash = table.new(position.top_right, 2, 11, border_width=1, border_color=color.new(#1e222d, 0), frame_color=color.new(#1e222d, 0), frame_width=1)
+    
+    // Header
+    table.cell(dash, 0, 0, "⚡ GODMODE QUANT ENGINE", bgcolor=color.new(#000000, 10), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, "V1.0", bgcolor=color.new(#000000, 10), text_color=color.white, text_size=size.normal)
+    
+    // Account Status
+    table.cell(dash, 0, 1, "Status", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, dd_limit_hit ? "🚫 DD LIMIT" : is_paused ? "⏸️ PAUSED" : "🟢 ACTIVE", bgcolor=dd_limit_hit ? color.new(#FF5252, 20) : is_paused ? color.new(#FF9800, 20) : color.new(#00E676, 20), text_color=color.white, text_size=size.small)
+
+    // Daily DD
+    table.cell(dash, 0, 2, "Daily Drawdown", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(daily_pnl_pct, "#.##") + "% / " + str.tostring(-inp_max_dd_day, "#.##") + "%", bgcolor=daily_pnl_pct < 0 ? color.new(#FF5252, 20) : color.new(#00E676, 20), text_color=color.white, text_size=size.small)
+    
+    // Regime
+    string regime_str = is_chop ? "CHOP 💤" : is_expansion ? "EXPANSION 🚀" : is_high_vol ? "HIGH VOL 🌋" : is_strong_trend ? "TRENDING 🔥" : "NORMAL 📊"
+    color regime_col  = is_chop ? color.new(#9E9E9E, 20) : is_expansion ? color.new(#2196F3, 20) : is_high_vol ? color.new(#FF5252, 20) : color.new(#00E676, 20)
+    table.cell(dash, 0, 3, "Market Regime", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, regime_str, bgcolor=regime_col, text_color=color.white, text_size=size.small)
+
+    // HTF Bias
+    table.cell(dash, 0, 4, "Macro Bias (H4)", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, mtf_bull ? "BULLISH 🟢" : mtf_bear ? "BEARISH 🔴" : "NEUTRAL ⚪", bgcolor=mtf_bull ? color.new(#00E676, 20) : mtf_bear ? color.new(#FF5252, 20) : color.new(#9E9E9E, 20), text_color=color.white, text_size=size.small)
+
+    // Threshold
+    table.cell(dash, 0, 5, "Adaptive Threshold", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(adaptive_thresh, "#.#"), bgcolor=color.new(#2196F3, 20), text_color=color.white, text_size=size.small)
+
+    // Scores
+    table.cell(dash, 0, 6, "Live Score (L / S)", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(bullScore, "#") + " / " + str.tostring(bearScore, "#"), bgcolor=color.new(#9C27B0, 20), text_color=color.white, text_size=size.small)
+
+    // Current Risk
+    table.cell(dash, 0, 7, "Current Risk", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(inp_risk_pct * risk_multiplier * 100, "#.##") + "%", bgcolor=risk_multiplier < 1.0 ? color.new(#FF9800, 20) : color.new(#00E676, 20), text_color=color.white, text_size=size.small)
+
+    // Trade Active
+    string pos_str = strategy.position_size > 0 ? "LONG 📈" : strategy.position_size < 0 ? "SHORT 📉" : "FLAT ➖"
+    color pos_col  = strategy.position_size > 0 ? color.new(#00E676, 20) : strategy.position_size < 0 ? color.new(#FF5252, 20) : color.new(#9E9E9E, 20)
+    table.cell(dash, 0, 8, "Position", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, pos_str, bgcolor=pos_col, text_color=color.white, text_size=size.small)
+
+    // Winrate
+    float wr = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0.0
+    table.cell(dash, 0, 9, "Winrate", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(wr, "#.##") + "%", bgcolor=wr >= 50 ? color.new(#00E676, 20) : color.new(#FF5252, 20), text_color=color.white, text_size=size.small)
+
+    // Profit Factor
+    float g_loss = strategy.grossloss > 0 ? strategy.grossloss : 1.0
+    float pf     = strategy.grossprofit / g_loss
+    table.cell(dash, 0, 10, "Profit Factor", bgcolor=color.new(#1e222d, 0), text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 10, str.tostring(pf, "#.##"), bgcolor=pf >= 1.5 ? color.new(#00E676, 20) : color.new(#FF9800, 20), text_color=color.white, text_size=size.small)
+
+// Alerts
+alertcondition(buySignal and can_trade, title="🚀 GODMODE LONG", message="GODMODE QUANT: Premium LONG entry detected! Score: {{plot_0}}")
+alertcondition(sellSignal and can_trade, title="🔻 GODMODE SHORT", message="GODMODE QUANT: Premium SHORT entry detected! Score: {{plot_0}}")

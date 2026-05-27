@@ -1,0 +1,73 @@
+# Pine Script
+*.pine
+!pine-scripts/**/*.pine
+
+# MetaTrader 5
+*.mq5
+*.ex5
+!mt5-expert-advisors/**/*.mq5
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# TradingView
+.tradingview/
+
+# MetaTrader
+MQL5/Logs/
+MQL5/Files/
+MQL5/MQL5/Logs/
+MQL5/MQL5/Files/
+
+# Backtesting data
+*.csv
+*.hst
+*.fxt
+*.hcc
+
+# Screenshots and temporary files
+screenshots/
+temp/
+tmp/
+*.tmp
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,599 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROPFIRM ELITE STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Elite PropFirm Strategy with Advanced SMC
+// Platform: TradingView (Pine Script v6)
+// Author: QuantAlgo Trading Systems
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Elite prop firm strategy with advanced Smart Money Concepts including
+// Breaker Blocks, Inducement detection, adaptive scoring, and comprehensive
+// risk management. Built for passing prop firm challenges.
+//
+// FEATURES:
+// - Advanced SMC patterns (Breaker, Inducement)
+// - Adaptive scoring system
+// - Multi-timeframe bias (H4, Daily)
+// - Killzone filtering
+// - Dynamic risk scaling
+// - Breakeven automation
+//
+// RISK WARNING:
+// This strategy is for educational purposes. Past performance does not guarantee
+// future results. Always test thoroughly and use proper risk management.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy(
+     "PropFirm Elite Strategy - QuantAlgo",
+     shorttitle = "PropFirm Elite",
+     overlay = true,
+     initial_capital = 1000,
+     currency = currency.USD,
+     default_qty_type = strategy.cash,
+     max_boxes_count = 200,
+     max_labels_count = 200,
+     max_lines_count = 200,
+     pyramiding = 0,
+     calc_on_every_tick = false
+)
+
+// ╔══════════════════════════════════════════╗
+// ║       🛡️ PROTECTION PROPFIRM            ║
+// ╚══════════════════════════════════════════╝
+grp_prop      = "🛡️ PROTECTION PROPFIRM"
+dailyLossMax  = input.float(50.0,  "Perte Max Jour ($)",      group = grp_prop)
+dailyTarget   = input.float(100.0, "Objectif Jour ($)",        group = grp_prop)
+riskPct       = input.float(0.5,   "Risque % par trade",      group = grp_prop, step = 0.1) / 100
+maxTradesDay  = input.int(20,      "Max Trades / Jour",        group = grp_prop, minval = 1, maxval = 50)
+maxConsecLoss = input.int(3,       "Pause après X pertes consec", group = grp_prop, minval = 1)
+recoveryMult  = input.float(0.5,   "Réduction risque recovery (%)", group = grp_prop, step = 0.1)
+
+// ╔══════════════════════════════════════════╗
+// ║       🏗️ STRUCTURE SMC                   ║
+// ╚══════════════════════════════════════════╝
+grp_smc    = "🏗️ STRUCTURE SMC / ICT"
+bosLen     = input.int(10,   "BOS Lookback",           group = grp_smc, minval = 3)
+obLookback = input.int(5,    "Order Block Lookback",   group = grp_smc, minval = 2)
+fvgMinATR  = input.float(0.3,"FVG Min Size (x ATR)",   group = grp_smc, step = 0.1)
+
+// ╔══════════════════════════════════════════╗
+// ║       📊 CONFIRMATIONS & FILTRES         ║
+// ╚══════════════════════════════════════════╝
+grp_conf     = "📊 CONFIRMATIONS"
+volMult      = input.float(1.2,  "Volume Spike Mult",    group = grp_conf, step = 0.1)
+minScoreInp  = input.int(5,     "Score Min (auto-ajusté)", group = grp_conf, minval = 2, maxval = 12)
+useKillzones = input.bool(true, "Killzones London/NY",   group = grp_conf)
+
+// ╔══════════════════════════════════════════╗
+// ║       🎨 VISUELS                         ║
+// ╚══════════════════════════════════════════╝
+grp_vis      = "🎨 VISUELS"
+showEMAs     = input.bool(true, "Afficher EMAs",          group = grp_vis)
+showLabels   = input.bool(true, "Afficher Labels BUY/SELL", group = grp_vis)
+showFVG      = input.bool(true, "Afficher FVG",            group = grp_vis)
+showOB       = input.bool(true, "Afficher Order Blocks",   group = grp_vis)
+showDash     = input.bool(true, "Afficher Dashboard",      group = grp_vis)
+showZones    = input.bool(true, "Afficher Zones SL/TP",    group = grp_vis)
+
+// ╔══════════════════════════════════════════╗
+// ║       📐 INDICATEURS DE BASE             ║
+// ╚══════════════════════════════════════════╝
+emaFast  = ta.ema(close, 9)
+emaMid   = ta.ema(close, 21)
+emaSlow  = ta.ema(close, 50)
+emaTrend = ta.ema(close, 200)
+
+atrValue  = ta.atr(14)
+atrSlow   = ta.atr(50)
+avgVol    = ta.sma(volume, 20)
+rsiValue  = ta.rsi(close, 14)
+[diPlus, diMinus, adxValue] = ta.dmi(14, 14)
+
+// ╔══════════════════════════════════════════╗
+// ║   🌐 MULTI-TIMEFRAME (HTF BIAS)         ║
+// ╚══════════════════════════════════════════╝
+// H4 Structure Bias (non-repaint: [1] offset)
+htfEma50  = request.security(syminfo.tickerid, "240", ta.ema(close[1], 50),  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htfEma200 = request.security(syminfo.tickerid, "240", ta.ema(close[1], 200), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+htfRSI    = request.security(syminfo.tickerid, "240", ta.rsi(close[1], 14),  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// Daily Bias
+dlyEma50  = request.security(syminfo.tickerid, "D", ta.ema(close[1], 50),  gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+dlyEma200 = request.security(syminfo.tickerid, "D", ta.ema(close[1], 200), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+// HTF Bias calculation
+htfBullish = htfEma50 > htfEma200
+htfBearish = htfEma50 < htfEma200
+dlyBullish = dlyEma50 > dlyEma200
+dlyBearish = dlyEma50 < dlyEma200
+
+// Pondération MTF: +2 si daily et H4 alignés, +1 si un seul
+mtfBullWeight = (dlyBullish ? 1 : 0) + (htfBullish ? 1 : 0)
+mtfBearWeight = (dlyBearish ? 1 : 0) + (htfBearish ? 1 : 0)
+
+// ╔══════════════════════════════════════════╗
+// ║   🔍 DÉTECTION RÉGIME DE MARCHÉ          ║
+// ╚══════════════════════════════════════════╝
+// Volatilité relative
+atrRatio     = atrValue / atrSlow
+isHighVol    = atrRatio > 1.5
+isLowVol     = atrRatio < 0.7
+isNormalVol  = not isHighVol and not isLowVol
+
+// Tendance via ADX
+isStrTrend   = adxValue > 30
+isMildTrend  = adxValue > 20 and adxValue <= 30
+isRanging    = adxValue <= 20
+
+// Compression = faible volatilité + range
+isCompressed = isLowVol and isRanging
+
+// News mode = explosion soudaine ATR
+atrChange    = atrValue / nz(atrValue[3], atrValue)
+isNewsSpike  = atrChange > 2.0
+
+// Régime final
+string marketRegime = isNewsSpike  ? "⚡ NEWS SPIKE" :
+     isCompressed   ? "🔄 COMPRESSION" :
+     isHighVol      ? "🌋 HIGH VOLATILITY" :
+     isStrTrend     ? "🔥 STRONG TREND" :
+     isMildTrend    ? "📈 TRENDING" :
+     "💤 RANGING"
+
+// ╔══════════════════════════════════════════╗
+// ║   ⏰ KILLZONES & SESSIONS               ║
+// ╚══════════════════════════════════════════╝
+hourUTC       = hour(time, "UTC")
+isLondonKZ    = hourUTC >= 7  and hourUTC < 10    // London Open 
+isNYKZ        = hourUTC >= 13 and hourUTC < 16    // NY Open
+isAsianKZ     = hourUTC >= 0  and hourUTC < 4     // Asian
+isActiveKZ    = isLondonKZ or isNYKZ
+isSessionOK   = useKillzones ? isActiveKZ : true
+
+// Session bonus pour le score
+sessionBonus  = isLondonKZ or isNYKZ ? 1 : 0
+
+// ╔══════════════════════════════════════════╗
+// ║   🏗️ SMC / ICT ENGINE AVANCÉ            ║
+// ╚══════════════════════════════════════════╝
+
+// --- Pivots pour structure ---
+leftBars  = 5
+rightBars = 5
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low, leftBars, rightBars)
+
+var float recentPH = na
+var float recentPL = na
+
+if not na(ph)
+    recentPH := ph
+if not na(pl)
+    recentPL := pl
+
+// --- BOS (Break of Structure) ---
+bullBOS = not na(recentPH) and close > recentPH and close[1] <= recentPH
+bearBOS = not na(recentPL) and close < recentPL and close[1] >= recentPL
+
+// --- CHOCH (Change of Character) ---
+var int lastStructDir = 0  // 1 = bull, -1 = bear
+if bullBOS
+    lastStructDir := 1
+if bearBOS
+    lastStructDir := -1
+
+bullCHOCH = bullBOS and lastStructDir[1] == -1
+bearCHOCH = bearBOS and lastStructDir[1] == 1
+
+// --- Liquidity Sweeps ---
+bullSweep = not na(recentPL) and low < recentPL and close > recentPL  // Sweep low puis close above
+bearSweep = not na(recentPH) and high > recentPH and close < recentPH // Sweep high puis close below
+
+// --- FVG (Fair Value Gap) avec filtre taille ---
+fvgBullGap = low - high[2]
+fvgBearGap = low[2] - high
+bullFVG    = low > high[2] and fvgBullGap > atrValue * fvgMinATR
+bearFVG    = high < low[2] and fvgBearGap > atrValue * fvgMinATR
+
+// --- Order Blocks (améliorés) ---
+bodySize       = math.abs(close - open)
+isDisplaceUp   = close > high[1] and bodySize > atrValue * 0.8 and close > open
+isDisplaceDown = close < low[1]  and bodySize > atrValue * 0.8 and close < open
+
+bullOB = isDisplaceUp  and close[1] < open[1]   // Bougie baissière avant impulsion haussière
+bearOB = isDisplaceDown and close[1] > open[1]   // Bougie haussière avant impulsion baissière
+
+// --- Breaker Blocks ---
+bullBreaker = bearBOS[1] and bullBOS  // Structure bear cassée puis retournement bull
+bearBreaker = bullBOS[1] and bearBOS  // Structure bull cassée puis retournement bear
+
+// --- Premium / Discount ---
+rangeMid     = (recentPH + recentPL) / 2
+isPremium    = not na(rangeMid) and close > rangeMid
+isDiscount   = not na(rangeMid) and close < rangeMid
+
+// Idéal: acheter en discount, vendre en premium
+bullZoneOK   = isDiscount or na(rangeMid)
+bearZoneOK   = isPremium  or na(rangeMid)
+
+// --- Inducement Detection ---
+// Faux breakout = mèche au-delà du niveau mais corps à l'intérieur
+bullInducement = not na(recentPL) and low < recentPL and close > recentPL and open > recentPL
+bearInducement = not na(recentPH) and high > recentPH and close < recentPH and open < recentPH
+
+// --- Volume Spike ---
+volSpike = volume > avgVol * volMult
+
+// --- Momentum réel ---
+momFast     = ta.mom(close, 3)
+momSlow     = ta.mom(close, 8)
+bullMom     = momFast > 0 and momSlow > 0
+bearMom     = momFast < 0 and momSlow < 0
+
+// ╔══════════════════════════════════════════╗
+// ║   FVG & OB VISUELS (boxes)              ║
+// ╚══════════════════════════════════════════╝
+if showFVG and bullFVG
+    box.new(bar_index - 2, high[2], bar_index, low, bgcolor = color.new(#00E676, 88), border_color = color.new(#00E676, 100))
+if showFVG and bearFVG
+    box.new(bar_index - 2, low[2], bar_index, high, bgcolor = color.new(#FF5252, 88), border_color = color.new(#FF5252, 100))
+
+if showOB and bullOB
+    box.new(bar_index - 1, high[1], bar_index + 5, low[1], bgcolor = color.new(#2196F3, 87), border_color = color.new(#2196F3, 50))
+if showOB and bearOB
+    box.new(bar_index - 1, high[1], bar_index + 5, low[1], bgcolor = color.new(#FF9800, 87), border_color = color.new(#FF9800, 50))
+
+// ╔══════════════════════════════════════════╗
+// ║   🎯 SCORE ADAPTATIF INTELLIGENT         ║
+// ╚══════════════════════════════════════════╝
+// Score dynamique: pondéré selon le régime de marché
+float trendW = isStrTrend ? 1.5 : isMildTrend ? 1.2 : 1.0  // Plus de poids structure en tendance
+float rangeW = isRanging ? 1.5 : 1.0                         // Plus de confirmations en range
+float volW   = isHighVol ? 0.8 : isLowVol ? 1.3 : 1.0       // Moins agressif en haute vol
+
+// Score BULL adaptatif
+float bullScore = 0.0
+bullScore += bullBOS   ? 3.0 * trendW : 0.0
+bullScore += bullCHOCH ? 2.5 * trendW : 0.0
+bullScore += bullSweep ? 2.0 : 0.0
+bullScore += bullFVG   ? 1.5 * rangeW : 0.0
+bullScore += bullOB    ? 1.5 * rangeW : 0.0
+bullScore += bullBreaker ? 2.0 : 0.0
+bullScore += bullInducement ? 1.5 : 0.0
+bullScore += volSpike  ? 1.0 : 0.0
+bullScore += bullMom   ? 1.0 : 0.0
+bullScore += bullZoneOK ? 1.0 : 0.0            // Discount zone
+bullScore += float(mtfBullWeight)               // +0 à +2 selon alignement HTF
+bullScore += float(sessionBonus)                // +1 killzone active
+bullScore += (emaFast > emaMid and emaMid > emaSlow) ? 1.5 : 0.0  // EMA alignées
+
+// Score BEAR adaptatif
+float bearScore = 0.0
+bearScore += bearBOS   ? 3.0 * trendW : 0.0
+bearScore += bearCHOCH ? 2.5 * trendW : 0.0
+bearScore += bearSweep ? 2.0 : 0.0
+bearScore += bearFVG   ? 1.5 * rangeW : 0.0
+bearScore += bearOB    ? 1.5 * rangeW : 0.0
+bearScore += bearBreaker ? 2.0 : 0.0
+bearScore += bearInducement ? 1.5 : 0.0
+bearScore += volSpike  ? 1.0 : 0.0
+bearScore += bearMom   ? 1.0 : 0.0
+bearScore += bearZoneOK ? 1.0 : 0.0            // Premium zone
+bearScore += float(mtfBearWeight)               // +0 à +2 selon alignement HTF
+bearScore += float(sessionBonus)                // +1 killzone active
+bearScore += (emaFast < emaMid and emaMid < emaSlow) ? 1.5 : 0.0  // EMA alignées
+
+// Seuil adaptatif selon régime
+float adaptiveThreshold = isStrTrend ? float(minScoreInp) * 0.8 :
+     isRanging ? float(minScoreInp) * 1.3 :
+     isHighVol ? float(minScoreInp) * 1.2 :
+     float(minScoreInp)
+
+// Anti contre-tendance HTF
+bool htfLongOK  = mtfBullWeight >= 1 or (mtfBullWeight == 0 and mtfBearWeight == 0)
+bool htfShortOK = mtfBearWeight >= 1 or (mtfBullWeight == 0 and mtfBearWeight == 0)
+
+// Signaux finaux
+bool buySignal  = bullScore >= adaptiveThreshold and isSessionOK and htfLongOK
+bool sellSignal = bearScore >= adaptiveThreshold and isSessionOK and htfShortOK
+
+// Anti-chop: pas de signal si les deux scores sont proches
+bool isChoppy = math.abs(bullScore - bearScore) < 2.0 and isRanging
+buySignal  := isChoppy ? false : buySignal
+sellSignal := isChoppy ? false : sellSignal
+
+// ╔══════════════════════════════════════════╗
+// ║   🛡️ GESTION RISQUE PROPFIRM ELITE      ║
+// ╚══════════════════════════════════════════╝
+var float dayStartEquity = strategy.equity
+var int   tradesToday    = 0
+var int   consecLosses   = 0
+var bool  isPaused       = false
+var bool  isRecovery     = false
+
+newDay = ta.change(time("D")) != 0
+
+if newDay
+    dayStartEquity := strategy.equity
+    tradesToday    := 0
+    consecLosses   := 0
+    isPaused       := false
+    isRecovery     := false
+
+// PnL journalier
+currentDailyPnL = strategy.equity - dayStartEquity
+
+// Suivi pertes consécutives (détecte nouvelle clôture de trade)
+var int prevClosedTrades = 0
+if strategy.closedtrades > prevClosedTrades
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastTradeProfit < 0
+        consecLosses += 1
+    else
+        consecLosses := 0
+        isRecovery   := false
+    prevClosedTrades := strategy.closedtrades
+
+// Pause après X pertes consécutives
+if consecLosses >= maxConsecLoss
+    isPaused := true
+
+// Mode recovery: risque réduit après 2+ pertes
+isRecovery := consecLosses >= 2
+
+// Facteur de risque dynamique
+float riskFactor = 1.0
+riskFactor := isRecovery ? recoveryMult : 1.0                     // Réduction recovery
+riskFactor := isHighVol  ? riskFactor * 0.7 : riskFactor          // Réduction haute vol
+riskFactor := isNewsSpike ? riskFactor * 0.5 : riskFactor         // Réduction news
+riskFactor := currentDailyPnL < -(dailyLossMax * 0.6) ? riskFactor * 0.5 : riskFactor  // Protection drawdown
+
+// Hard stops
+bool dailyLossOK  = currentDailyPnL > -dailyLossMax
+bool dailyGoalHit = currentDailyPnL >= dailyTarget
+bool canTrade     = dailyLossOK and not dailyGoalHit and not isPaused and tradesToday < maxTradesDay
+
+// Status du compte
+string accountStatus = not dailyLossOK ? "🚫 DAILY LOSS HIT" :
+     dailyGoalHit  ? "✅ GOAL REACHED" :
+     isPaused       ? "⏸️ PAUSED (losses)" :
+     isRecovery     ? "⚠️ RECOVERY MODE" :
+     "🟢 ACTIVE"
+
+// ╔══════════════════════════════════════════╗
+// ║   💰 EXECUTION ENGINE                    ║
+// ╚══════════════════════════════════════════╝
+// SL/TP dynamiques basés sur structure + liquidité
+float slMultiplier = isHighVol ? 2.0 : isNewsSpike ? 2.5 : isRanging ? 1.2 : 1.5
+
+// Calcul SL structurel: utilise le dernier pivot comme base si dispo
+float bullSLstruct = not na(recentPL) ? recentPL - atrValue * 0.3 : close - atrValue * slMultiplier
+float bearSLstruct = not na(recentPH) ? recentPH + atrValue * 0.3 : close + atrValue * slMultiplier
+
+// TP basé sur liquidité: vise le prochain niveau structurel
+float tpMultiplier = isStrTrend ? 3.0 : isMildTrend ? 2.5 : 2.0
+
+var float activeSL  = na
+var float activeTP1 = na
+var float activeTP2 = na
+
+if canTrade and strategy.position_size == 0
+
+    if buySignal
+        // SL = max entre structure et ATR
+        float buySL  = math.min(bullSLstruct, close - atrValue * slMultiplier)
+        float slDist = close - buySL
+        slDist := math.max(slDist, atrValue * 0.5)  // SL minimum
+
+        float buyTP1 = close + slDist * 1.5   // TP1 = 1.5R
+        float buyTP2 = close + slDist * tpMultiplier  // TP2 adaptatif
+
+        // Position sizing avec facteur de risque
+        float riskAmt = strategy.equity * riskPct * riskFactor
+        float qty     = slDist > 0 ? riskAmt / slDist : 0
+
+        activeSL  := buySL
+        activeTP1 := buyTP1
+        activeTP2 := buyTP2
+
+        strategy.entry("V10 Buy", strategy.long, qty = qty)
+        strategy.exit("TP1 Buy", "V10 Buy", qty_percent = 50, limit = buyTP1, stop = buySL)
+        strategy.exit("TP2 Buy", "V10 Buy", limit = buyTP2, stop = buySL)
+        tradesToday += 1
+
+    if sellSignal
+        float sellSL = math.max(bearSLstruct, close + atrValue * slMultiplier)
+        float slDist = sellSL - close
+        slDist := math.max(slDist, atrValue * 0.5)
+
+        float sellTP1 = close - slDist * 1.5
+        float sellTP2 = close - slDist * tpMultiplier
+
+        float riskAmt = strategy.equity * riskPct * riskFactor
+        float qty     = slDist > 0 ? riskAmt / slDist : 0
+
+        activeSL  := sellSL
+        activeTP1 := sellTP1
+        activeTP2 := sellTP2
+
+        strategy.entry("V10 Sell", strategy.short, qty = qty)
+        strategy.exit("TP1 Sell", "V10 Sell", qty_percent = 50, limit = sellTP1, stop = sellSL)
+        strategy.exit("TP2 Sell", "V10 Sell", limit = sellTP2, stop = sellSL)
+        tradesToday += 1
+
+// Break-even intelligent après TP1 touché
+if strategy.position_size > 0 and not na(activeTP1)
+    if high >= activeTP1
+        activeSL := strategy.position_avg_price + atrValue * 0.1  // BE + petit buffer
+        strategy.exit("TP2 Buy", "V10 Buy", limit = activeTP2, stop = activeSL)
+
+if strategy.position_size < 0 and not na(activeTP1)
+    if low <= activeTP1
+        activeSL := strategy.position_avg_price - atrValue * 0.1
+        strategy.exit("TP2 Sell", "V10 Sell", limit = activeTP2, stop = activeSL)
+
+// Reset quand flat
+if strategy.position_size == 0
+    activeSL  := na
+    activeTP1 := na
+    activeTP2 := na
+
+// ╔══════════════════════════════════════════╗
+// ║   📊 EMAs VISUELS                        ║
+// ╚══════════════════════════════════════════╝
+plot(showEMAs ? emaFast  : na, "EMA 9",   color = color.new(#00E676, 0), linewidth = 1)
+plot(showEMAs ? emaMid   : na, "EMA 21",  color = color.new(#FF9800, 0), linewidth = 1)
+plot(showEMAs ? emaSlow  : na, "EMA 50",  color = color.new(#2196F3, 0), linewidth = 2)
+plot(showEMAs ? emaTrend : na, "EMA 200", color = color.new(#9C27B0, 0), linewidth = 2)
+
+// ╔══════════════════════════════════════════╗
+// ║   🏷️ LABELS DÉBUTANT FRIENDLY            ║
+// ╚══════════════════════════════════════════╝
+// Signaux BUY / SELL
+plotshape(buySignal and canTrade,  title = "BUY",  style = shape.labelup,   location = location.belowbar, color = color.new(#00E676, 0), text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(sellSignal and canTrade, title = "SELL", style = shape.labeldown, location = location.abovebar, color = color.new(#FF5252, 0), text = "SELL", textcolor = color.white, size = size.small)
+
+// Zones SL / TP visuelles
+inTrade = strategy.position_size != 0
+entryP  = inTrade ? strategy.position_avg_price : na
+pEntry  = plot(entryP, "Entry Price", color = color.new(#2196F3, 0), style = plot.style_linebr, linewidth = 1)
+pSL     = plot(inTrade ? activeSL  : na, "Stop Loss",    color = color.new(#FF5252, 0), style = plot.style_linebr, linewidth = 1)
+pTP     = plot(inTrade ? activeTP2 : na, "Take Profit",  color = color.new(#00E676, 0), style = plot.style_linebr, linewidth = 1)
+fill(pEntry, pTP, color = showZones ? color.new(#00E676, 92) : na, title = "Profit Zone")
+fill(pEntry, pSL, color = showZones ? color.new(#FF5252, 92) : na, title = "Risk Zone")
+
+// Labels détaillés sur entry
+var line entryLine = na
+var line slLine    = na
+var line tpLine    = na
+var label entryLbl = na
+var label slLbl    = na
+var label tpLbl    = na
+
+if showLabels and canTrade and strategy.position_size == 0
+    if buySignal
+        bEntry = close
+        bSL    = math.min(bullSLstruct, close - atrValue * slMultiplier)
+        bSlD   = bEntry - bSL
+        bTP    = bEntry + bSlD * tpMultiplier
+        bRR    = bSlD > 0 ? (bTP - bEntry) / bSlD : 0
+        bRisk  = strategy.equity * riskPct * riskFactor
+
+        line.delete(entryLine)
+        line.delete(slLine)
+        line.delete(tpLine)
+        label.delete(entryLbl)
+        label.delete(slLbl)
+        label.delete(tpLbl)
+
+        entryLine := line.new(bar_index, bEntry, bar_index + 15, bEntry, width = 2, color = color.new(#2196F3, 20))
+        slLine    := line.new(bar_index, bSL,    bar_index + 15, bSL,    width = 2, color = color.new(#FF5252, 20))
+        tpLine    := line.new(bar_index, bTP,    bar_index + 15, bTP,    width = 2, color = color.new(#00E676, 20))
+
+        entryLbl := label.new(bar_index, bEntry, "🚀 BUY ENTRY\n" + str.tostring(bEntry, "#.####") + "\nScore: " + str.tostring(bullScore, "#.#") + "/" + str.tostring(adaptiveThreshold, "#.#") + "\nRisk: $" + str.tostring(bRisk, "#.##"), style = label.style_label_up, color = color.new(#2196F3, 10), textcolor = color.white, size = size.normal)
+        slLbl    := label.new(bar_index, bSL, "🛑 STOP LOSS\n" + str.tostring(bSL, "#.####"), style = label.style_label_down, color = color.new(#FF5252, 10), textcolor = color.white, size = size.normal)
+        tpLbl    := label.new(bar_index, bTP, "🎯 TAKE PROFIT\n" + str.tostring(bTP, "#.####") + "\nRR: " + str.tostring(bRR, "#.#") + ":1", style = label.style_label_up, color = color.new(#00E676, 10), textcolor = color.white, size = size.normal)
+
+    if sellSignal
+        sEntry = close
+        sSL    = math.max(bearSLstruct, close + atrValue * slMultiplier)
+        sSlD   = sSL - sEntry
+        sTP    = sEntry - sSlD * tpMultiplier
+        sRR    = sSlD > 0 ? (sEntry - sTP) / sSlD : 0
+        sRisk  = strategy.equity * riskPct * riskFactor
+
+        line.delete(entryLine)
+        line.delete(slLine)
+        line.delete(tpLine)
+        label.delete(entryLbl)
+        label.delete(slLbl)
+        label.delete(tpLbl)
+
+        entryLine := line.new(bar_index, sEntry, bar_index + 15, sEntry, width = 2, color = color.new(#FF9800, 20))
+        slLine    := line.new(bar_index, sSL,    bar_index + 15, sSL,    width = 2, color = color.new(#FF5252, 20))
+        tpLine    := line.new(bar_index, sTP,    bar_index + 15, sTP,    width = 2, color = color.new(#00E676, 20))
+
+        entryLbl := label.new(bar_index, sEntry, "🔻 SELL ENTRY\n" + str.tostring(sEntry, "#.####") + "\nScore: " + str.tostring(bearScore, "#.#") + "/" + str.tostring(adaptiveThreshold, "#.#") + "\nRisk: $" + str.tostring(sRisk, "#.##"), style = label.style_label_down, color = color.new(#FF9800, 10), textcolor = color.white, size = size.normal)
+        slLbl    := label.new(bar_index, sSL, "🛑 STOP LOSS\n" + str.tostring(sSL, "#.####"), style = label.style_label_up, color = color.new(#FF5252, 10), textcolor = color.white, size = size.normal)
+        tpLbl    := label.new(bar_index, sTP, "🎯 TAKE PROFIT\n" + str.tostring(sTP, "#.####") + "\nRR: " + str.tostring(sRR, "#.#") + ":1", style = label.style_label_down, color = color.new(#00E676, 10), textcolor = color.white, size = size.normal)
+
+// ╔══════════════════════════════════════════╗
+// ║   📊 DASHBOARD ELITE                     ║
+// ╚══════════════════════════════════════════╝
+var table dash = table.new(position.top_right, 2, 12, border_width = 1, border_color = color.new(#424242, 50))
+
+if showDash and barstate.islast
+    // Header
+    table.cell(dash, 0, 0, " ⚡ V10 ELITE PROPFIRM ", bgcolor = color.new(#1A237E, 0), text_color = color.white, text_size = size.normal)
+    table.cell(dash, 1, 0, "STATUS", bgcolor = color.new(#1A237E, 0), text_color = color.white, text_size = size.normal)
+
+    // 1. Account Status
+    accColor = canTrade ? color.new(#00E676, 10) : color.new(#FF5252, 10)
+    table.cell(dash, 0, 1, "Account", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 1, accountStatus, bgcolor = accColor, text_color = color.white, text_size = size.small)
+
+    // 2. Daily PnL
+    pnlColor = currentDailyPnL >= 0 ? color.new(#00E676, 10) : color.new(#FF5252, 10)
+    table.cell(dash, 0, 2, "Daily PnL", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 2, str.tostring(currentDailyPnL, "#.##") + "$ / " + str.tostring(dailyTarget, "#") + "$", bgcolor = pnlColor, text_color = color.white, text_size = size.small)
+
+    // 3. Market Regime
+    regColor = isStrTrend ? color.new(#00E676, 10) : isRanging ? color.new(#FF9800, 10) : isHighVol ? color.new(#FF5252, 10) : color.new(#2196F3, 10)
+    table.cell(dash, 0, 3, "Market", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 3, marketRegime, bgcolor = regColor, text_color = color.white, text_size = size.small)
+
+    // 4. HTF Bias
+    htfStr = mtfBullWeight > mtfBearWeight ? "BULLISH 🟢" : mtfBearWeight > mtfBullWeight ? "BEARISH 🔴" : "NEUTRAL ⚪"
+    htfCol = mtfBullWeight > mtfBearWeight ? color.new(#00E676, 10) : mtfBearWeight > mtfBullWeight ? color.new(#FF5252, 10) : color.new(#9E9E9E, 10)
+    table.cell(dash, 0, 4, "HTF Bias", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 4, htfStr, bgcolor = htfCol, text_color = color.white, text_size = size.small)
+
+    // 5. Session
+    sessStr = isLondonKZ ? "🇬🇧 LONDON" : isNYKZ ? "🇺🇸 NEW YORK" : isAsianKZ ? "🌏 ASIAN" : "🌙 OFF-HOURS"
+    sessCol = isActiveKZ ? color.new(#00E676, 10) : color.new(#9E9E9E, 10)
+    table.cell(dash, 0, 5, "Session", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 5, sessStr, bgcolor = sessCol, text_color = color.white, text_size = size.small)
+
+    // 6. Score
+    table.cell(dash, 0, 6, "Score", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 6, "L:" + str.tostring(bullScore, "#.#") + " S:" + str.tostring(bearScore, "#.#") + " (min:" + str.tostring(adaptiveThreshold, "#.#") + ")", bgcolor = color.new(#1565C0, 10), text_color = color.white, text_size = size.small)
+
+    // 7. Trades Today
+    table.cell(dash, 0, 7, "Trades", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 7, str.tostring(tradesToday) + " / " + str.tostring(maxTradesDay), bgcolor = color.new(#1565C0, 10), text_color = color.white, text_size = size.small)
+
+    // 8. Risk Factor
+    riskStr = str.tostring(riskFactor * 100, "#") + "%"
+    riskCol = riskFactor < 0.6 ? color.new(#FF5252, 10) : riskFactor < 1.0 ? color.new(#FF9800, 10) : color.new(#00E676, 10)
+    table.cell(dash, 0, 8, "Risk Level", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 8, riskStr, bgcolor = riskCol, text_color = color.white, text_size = size.small)
+
+    // 9. Active Trade
+    posStr = strategy.position_size > 0 ? "LONG 📈" : strategy.position_size < 0 ? "SHORT 📉" : "FLAT"
+    posCol = strategy.position_size > 0 ? color.new(#00E676, 10) : strategy.position_size < 0 ? color.new(#FF5252, 10) : color.new(#9E9E9E, 10)
+    table.cell(dash, 0, 9, "Position", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 9, posStr, bgcolor = posCol, text_color = color.white, text_size = size.small)
+
+    // 10. Winrate
+    wr = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    wrCol = wr >= 55 ? color.new(#00E676, 10) : wr >= 45 ? color.new(#FF9800, 10) : color.new(#FF5252, 10)
+    table.cell(dash, 0, 10, "Winrate", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 10, str.tostring(wr, "#.#") + "%", bgcolor = wrCol, text_color = color.white, text_size = size.small)
+
+    // 11. Profit Factor
+    grossL = strategy.grossloss > 0 ? strategy.grossloss : 1
+    pf = strategy.grossprofit / grossL
+    pfCol = pf >= 1.5 ? color.new(#00E676, 10) : pf >= 1.0 ? color.new(#FF9800, 10) : color.new(#FF5252, 10)
+    table.cell(dash, 0, 11, "Profit Factor", bgcolor = color.new(#37474F, 0), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 11, str.tostring(pf, "#.##"), bgcolor = pfCol, text_color = color.white, text_size = size.small)
+
+// ╔══════════════════════════════════════════╗
+// ║   🔔 ALERTES                             ║
+// ╚══════════════════════════════════════════╝
+alertcondition(buySignal  and canTrade, title = "V10 LONG",  message = "V10 Elite: 🟢 LONG Signal | Score: {{plot_0}}")
+alertcondition(sellSignal and canTrade, title = "V10 SHORT", message = "V10 Elite: 🔴 SHORT Signal | Score: {{plot_0}}")
+alertcondition(not dailyLossOK,         title = "DAILY LOSS", message = "V10 Elite: 🚫 Daily Loss Limit Hit!")
+alertcondition(isPaused,                title = "PAUSED",     message = "V10 Elite: ⏸️ Trading Paused - Consecutive Losses")
