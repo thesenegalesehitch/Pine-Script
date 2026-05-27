@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 //| Expert Advisor: Reactive BOS Strategy with PropFirm Safety      |
 //| Platform: MetaTrader 5 (MQL5)                                     |
-//| Author: QuantAlgo Trading Systems                                 |
+//| Author: Alexandre Albert Ndour                                   |
 //| Version: 1.0.0                                                    |
 //| License: MIT                                                      |
 //+------------------------------------------------------------------+
