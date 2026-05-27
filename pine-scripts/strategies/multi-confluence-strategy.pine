@@ -1,0 +1,337 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMC PRO MULTI-CONFLUENCE STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: ICT Framework with Multi-Confluence Analysis
+// Platform: TradingView (Pine Script v6)
+// Author: Alexandre Albert Ndour
+// Version: 1.0.0
+// License: MIT
+//
+strategy("SMC Pro Multi-Confluence | ICT Framework", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, calc_on_every_tick=false, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
+
+// ========================================================================= //
+// 1. INPUTS - PARAMÈTRES MODULAIRES
+// ========================================================================= //
+
+grp_trend  = "1. TENDANCE & HTF BIAS"
+htf_tf     = input.timeframe("240", "Timeframe HTF", group=grp_trend)
+use_htf    = input.bool(true, "Filtrer avec HTF Bias", group=grp_trend)
+ema_len    = input.int(200, "EMA Tendance (Optionnel)", group=grp_trend)
+show_ema   = input.bool(false, "Afficher EMA", group=grp_trend)
+
+grp_str    = "2. STRUCTURE & LIQUIDITÉ"
+sw_len     = input.int(5, "Sensibilité Swing (Structure)", group=grp_str)
+liq_tol    = input.float(5.0, "Tolérance Equal Highs/Lows (Pips)", group=grp_str)
+show_liq   = input.bool(true, "Afficher Liquidité", group=grp_str)
+
+grp_zone   = "3. ORDER BLOCKS & FAIR VALUE GAPS"
+min_fvg    = input.float(3.0, "Taille Min FVG (Pips)", group=grp_zone)
+show_ob    = input.bool(true, "Afficher Order Blocks", group=grp_zone)
+show_fvg   = input.bool(true, "Afficher FVG", group=grp_zone)
+max_zones  = input.int(10, "Max Zones Affichées", group=grp_zone)
+
+grp_crt    = "4. CRT / CONFIRMATION"
+use_crt    = input.bool(true, "Exiger Confirmation CRT", group=grp_crt)
+displacement_mult = input.float(1.5, "Multiplicateur Displacement (ATR)", group=grp_crt)
+
+grp_risk   = "5. RISK MANAGEMENT"
+risk_pct   = input.float(1.0, "Risque %", step=0.1, group=grp_risk)
+rr_ratio   = input.float(4.0, "Ratio RR Cible", step=0.5, group=grp_risk)
+sl_type    = input.string("Zone", "Type SL", options=["Zone", "Swing", "Sweep"], group=grp_risk)
+
+grp_sess   = "6. SESSIONS & NIVEAUX"
+use_ny     = input.bool(true, "Session New York", group=grp_sess)
+use_ldn    = input.bool(true, "Session London", group=grp_sess)
+show_pdhl  = input.bool(true, "Previous Day H/L", group=grp_sess)
+
+grp_ui     = "7. INTERFACE & DASHBOARD"
+show_dash  = input.bool(true, "Afficher Dashboard", group=grp_ui)
+show_labels = input.bool(true, "Afficher Labels Entrée", group=grp_ui)
+
+// ========================================================================= //
+// 2. TYPES & OBJETS - OPTIMISATION MÉMOIRE
+// ========================================================================= //
+
+type Zone_Data
+    box bx
+    bool is_bull
+    float top
+    float bot
+    bool mitigated
+    string zone_type // "OB" ou "FVG"
+
+type Liq_Data
+    line ln
+    float price
+    bool is_bsl
+    bool swept
+
+var array<Zone_Data> ob_array  = array.new<Zone_Data>()
+var array<Zone_Data> fvg_array = array.new<Zone_Data>()
+var array<Liq_Data>  liq_array = array.new<Liq_Data>()
+
+// ========================================================================= //
+// 3. FONCTIONS UTILITAIRES MTF (ANTI-REPAINT)
+// ========================================================================= //
+
+// Récupération données HTF cloturées (Anti-repaint absolu)
+get_htf_bias() =>
+    [h, l, c] = request.security(syminfo.tickerid, htf_tf, [high, low, close], barmerge.gaps_off, barmerge.lookahead_on)
+    h_c = h[1], l_c = l[1], c_c = c[1]
+    bias = na
+    if not na(c_c)
+        if c_c > math.avg(h_c, l_c) and c_c > c_c[1]
+            bias := "BULL"
+        else if c_c < math.avg(h_c, l_c) and c_c < c_c[1]
+            bias := "BEAR"
+        else
+            bias := "NEUTRAL"
+    bias
+
+is_session_active() =>
+    sess_str = (use_ldn ? "0800-1200:" : "") + (use_ny ? "1300-1700:" : "")
+    not na(time(timeframe.period, sess_str))
+
+// ========================================================================= //
+// 4. TENDANCE INTELLIGENTE & STRUCTURE
+// ========================================================================= //
+
+// EMA
+ema_val = ta.ema(close, ema_len)
+plot(show_ema ? ema_val : na, "EMA", color=ta.crossover(close, ema_val) ? #089981 : ta.crossunder(close, ema_val) ? #f23645 : color.gray, linewidth=2)
+
+// Swings & Structure
+pivot_h = ta.pivothigh(high, sw_len, sw_len)
+pivot_l = ta.pivotlow(low, sw_len, sw_len)
+
+var string trend = "NEUTRAL"
+var float last_sh = na
+var float last_sl = na
+
+if not na(pivot_h)
+    last_sh := pivot_h
+    if close < last_sl
+        trend := "BEAR"
+if not na(pivot_l)
+    last_sl := pivot_l
+    if close > last_sh
+        trend := "BULL"
+
+htf_bias = use_htf ? get_htf_bias() : "NEUTRAL"
+final_trend = use_htf ? (htf_bias != "NEUTRAL" ? htf_bias : trend) : trend
+
+// ========================================================================= //
+// 5. LIQUIDITÉ & SWEEPS
+// ========================================================================= //
+
+var string last_sweep = "NONE"
+
+if barstate.isconfirmed
+    if not na(pivot_h)
+        ln = line.new(bar_index[sw_len], pivot_h, bar_index, pivot_h, color=color.new(#f23645, 70), style=line.style_dotted)
+        array.push(liq_array, Liq_Data.new(ln, pivot_h, true, false))
+    if not na(pivot_l)
+        ln = line.new(bar_index[sw_len], pivot_l, bar_index, pivot_l, color=color.new(#089981, 70), style=line.style_dotted)
+        array.push(liq_array, Liq_Data.new(ln, pivot_l, false, false))
+
+    if array.size(liq_array) > 0
+        for i = array.size(liq_array) - 1 to 0
+            lq = array.get(liq_array, i)
+            if not lq.swept
+                if lq.is_bsl and high > lq.price and close < lq.price // Sweep & Reject BSL
+                    lq.swept := true
+                    line.set_style(lq.ln, line.style_solid)
+                    last_sweep := "BSL"
+                else if not lq.is_bsl and low < lq.price and close > lq.price // Sweep & Reject SSL
+                    lq.swept := true
+                    line.set_style(lq.ln, line.style_solid)
+                    last_sweep := "SSL"
+
+// ========================================================================= //
+// 6. MOTEUR ORDER BLOCKS & FVG (ZONES)
+// ========================================================================= //
+
+// --- Gestion Affichage (Limite mémoire) ---
+manage_array_size(arr) =>
+    while array.size(arr) > max_zones
+        old = array.shift(arr)
+        box.delete(old.bx)
+
+// --- ORDER BLOCKS ---
+is_ob_bull = close[1] < open[1] and close > open and close > high[1]
+is_ob_bear = close[1] > open[1] and close < open and close < low[1]
+
+if barstate.isconfirmed and show_ob
+    if is_ob_bull
+        bx = box.new(bar_index[1], high[1], bar_index+10, low[1], border_color=#089981, bgcolor=color.new(#089981, 85))
+        array.push(ob_array, Zone_Data.new(bx, true, high[1], low[1], false, "OB"))
+        manage_array_size(ob_array)
+    if is_ob_bear
+        bx = box.new(bar_index[1], high[1], bar_index+10, low[1], border_color=#f23645, bgcolor=color.new(#f23645, 85))
+        array.push(ob_array, Zone_Data.new(bx, false, high[1], low[1], false, "OB"))
+        manage_array_size(ob_array)
+
+// --- FAIR VALUE GAPS ---
+fvg_top = low < high[2] ? high[2] : na
+fvg_bot = high > low[2] ? low[2] : na
+fvg_sz  = (fvg_top - fvg_bot) / syminfo.mintick
+is_fvg_bull = close > open and fvg_sz > min_fvg
+is_fvg_bear = close < open and fvg_sz > min_fvg
+
+if barstate.isconfirmed and show_fvg
+    if is_fvg_bull
+        bx = box.new(bar_index[1], fvg_top, bar_index+15, fvg_bot, border_color=color.new(#089981, 60), bgcolor=color.new(#089981, 92))
+        array.push(fvg_array, Zone_Data.new(bx, true, fvg_top, fvg_bot, false, "FVG"))
+        manage_array_size(fvg_array)
+    if is_fvg_bear
+        bx = box.new(bar_index[1], fvg_top, bar_index+15, fvg_bot, border_color=color.new(#f23645, 60), bgcolor=color.new(#f23645, 92))
+        array.push(fvg_array, Zone_Data.new(bx, false, fvg_top, fvg_bot, false, "FVG"))
+        manage_array_size(fvg_array)
+
+// --- MITIGATION TRACKING ---
+check_zone_mitigation(arr) =>
+    if array.size(arr) > 0 and barstate.isconfirmed
+        for i = array.size(arr) - 1 to 0
+            z = array.get(arr, i)
+            if not z.mitigated
+                if (z.is_bull and close < z.bot) or (not z.is_bull and close > z.top)
+                    z.mitigated := true
+                    box.set_bgcolor(z.bx, color.new(color.gray, 95))
+                    box.set_border_color(z.bx, color.new(color.gray, 95))
+
+check_zone_mitigation(ob_array)
+check_zone_mitigation(fvg_array)
+
+// ========================================================================= //
+// 7. LOGIQUE D'ENTRÉE MULTI-CONFLUENCE
+// ========================================================================= //
+
+// Vérification si le prix est dans une zone valide
+in_valid_zone(is_buy) =>
+    res = false
+    // Check OBs
+    if show_ob
+        for i = array.size(ob_array) - 1 to 0
+            z = array.get(ob_array, i)
+            if not z.mitigated and z.is_bull == is_buy and close >= z.bot and close <= z.top
+                res := true
+                break
+    // Check FVGs
+    if not res and show_fvg
+        for i = array.size(fvg_array) - 1 to 0
+            z = array.get(fvg_array, i)
+            if not z.mitigated and z.is_bull == is_buy and close >= z.bot and close <= z.top
+                res := true
+                break
+    res
+
+// CRT / Displacement (Bougie expulsive)
+atr_val = ta.atr(14)
+is_crt_bull = close > open and (close - open) > (atr_val * displacement_mult)
+is_crt_bear = close < open and (open - close) > (atr_val * displacement_mult)
+
+// --- CONDITIONS BUY ---
+// 1. Tendance Bullish 2. Sweep SSL 3. Dans Zone Bull 4. CRT Confirme
+cond_buy = final_trend == "BULL" and last_sweep == "SSL" and in_valid_zone(true) and (use_crt ? is_crt_bull : true) and is_session_active()
+
+// --- CONDITIONS SELL ---
+// 1. Tendance Bearish 2. Sweep BSL 3. Dans Zone Bear 4. CRT Confirme
+cond_sell = final_trend == "BEAR" and last_sweep == "BSL" and in_valid_zone(false) and (use_crt ? is_crt_bear : true) and is_session_active()
+
+// ========================================================================= //
+// 8. NIVEAUX CLÉS (PDH / PDL)
+// ========================================================================= //
+
+if show_pdhl
+    pdh = request.security(syminfo.tickerid, "D", high[1], barmerge.gaps_off, barmerge.lookahead_on)
+    pdl = request.security(syminfo.tickerid, "D", low[1], barmerge.gaps_off, barmerge.lookahead_on)
+    plot(pdh, "PDH", color.new(color.white, 50), style=plot.style_circles)
+    plot(pdl, "PDL", color.new(color.white, 50), style=plot.style_circles)
+
+// ========================================================================= //
+// 9. EXÉCUTION, SL & TP DYNAMIQUES
+// ========================================================================= //
+
+var float trade_sl = na
+var float trade_tp = na
+
+if strategy.position_size == 0
+    if cond_buy
+        // SL : Sous la zone, sous le swing, ou sous le sweep
+        sl = sl_type == "Zone" ? last_sl : (sl_type == "Swing" ? ta.lowest(low, sw_len) : low[1])
+        sl := sl - (2 * syminfo.mintick) // Marge
+        tp = close + ((close - sl) * rr_ratio)
+        
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", "Long", stop=sl, limit=tp)
+        
+        if show_labels
+            label.new(bar_index, low, "🟢 BUY", style=label.style_label_up, color=#089981, textcolor=color.white, size=size.large)
+            label.new(bar_index, sl, "SL", style=label.style_label_down, color=color.new(#f23645, 50), textcolor=color.white, size=size.small)
+            label.new(bar_index, tp, "TP ("+str.tostring(rr_ratio)+"R)", style=label.style_label_up, color=color.new(#089981, 50), textcolor=color.white, size=size.small)
+            box.new(bar_index, close, bar_index+5, sl, border_color=color.new(#f23645, 70), bgcolor=color.new(#f23645, 92)) // Zone SL Visuelle
+
+    if cond_sell
+        sl = sl_type == "Zone" ? last_sh : (sl_type == "Swing" ? ta.highest(high, sw_len) : high[1])
+        sl := sl + (2 * syminfo.mintick)
+        tp = close - ((sl - close) * rr_ratio)
+        
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", "Short", stop=sl, limit=tp)
+        
+        if show_labels
+            label.new(bar_index, high, "🔴 SELL", style=label.style_label_down, color=#f23645, textcolor=color.white, size=size.large)
+            label.new(bar_index, sl, "SL", style=label.style_label_up, color=color.new(#f23645, 50), textcolor=color.white, size=size.small)
+            label.new(bar_index, tp, "TP ("+str.tostring(rr_ratio)+"R)", style=label.style_label_down, color=color.new(#089981, 50), textcolor=color.white, size=size.small)
+            box.new(bar_index, close, bar_index+5, sl, border_color=color.new(#f23645, 70), bgcolor=color.new(#f23645, 92))
+
+// ========================================================================= //
+// 10. ALERTES WEBHOOK
+// ========================================================================= //
+
+alertcondition(cond_buy, title="BUY SIGNAL", message="SMC PRO: BUY SIGNAL - Confluences Validées")
+alertcondition(cond_sell, title="SELL SIGNAL", message="SMC PRO: SELL SIGNAL - Confluences Validées")
+alertcondition(last_sweep=="SSL", title="SSL SWEEP", message="SMC PRO: Sell Side Liquidity Swept")
+alertcondition(last_sweep=="BSL", title="BSL SWEEP", message="SMC PRO: Buy Side Liquidity Swept")
+
+// ========================================================================= //
+// 11. DASHBOARD STATISTIQUES PREMIUM
+// ========================================================================= //
+
+if show_dash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 9, border_width=1, border_color=color.new(color.white, 80), frame_color=color.new(color.white, 80), frame_width=1)
+    
+    bg_dark = color.new(#131722, 10)
+    bg_head = color.new(#1e222d, 0)
+    
+    table.cell(dash, 0, 0, "SMC PRO FRAMEWORK", text_color=color.white, bgcolor=bg_head, text_size=size.normal)
+    table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=bg_head, text_size=size.normal)
+    
+    table.cell(dash, 0, 1, "HTF BIAS", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 1, htf_bias, text_color=htf_bias=="BULL"?#089981:htf_bias=="BEAR"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 2, "TREND", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 2, trend, text_color=trend=="BULL"?#089981:trend=="BEAR"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 3, "LIQUIDITY", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 3, last_sweep, text_color=last_sweep=="SSL"?#089981:last_sweep=="BSL"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "SESSION", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 4, is_session_active() ? "ACTIVE ●" : "OFF ○", text_color=is_session_active() ? #089981 : color.red, bgcolor=bg_dark, text_size=size.small)
+    
+    // Stats Backtest
+    win_rate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : na
+    profit_factor = strategy.grossloss != 0 ? abs(strategy.grossprofit / strategy.grossloss) : na
+    
+    table.cell(dash, 0, 5, "WIN RATE", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(win_rate, "#.##") + "%", text_color=win_rate>50?#089981:color.red, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 6, "PROFIT FACTOR", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(profit_factor, "#.##"), text_color=profit_factor>1.5?#089981:color.red, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 7, "TOTAL TRADES", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 8, "MAX DD %", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 8, str.tostring(strategy.max_drawdown / strategy.initial_capital * 100, "#.##") + "%", text_color=color.red, bgcolor=bg_dark, text_size=size.small)

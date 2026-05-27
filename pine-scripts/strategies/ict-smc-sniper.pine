@@ -1,0 +1,349 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// ICT/SMC M1 SNIPER
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: CRT + Structure + PI Analysis
+// Platform: TradingView (Pine Script v6)
+// Author: Alexandre Albert Ndour
+// Version: 1.0.0
+// License: MIT
+//
+strategy("ICT/SMC M1 Sniper | CRT + Structure + PI", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, calc_on_every_tick=false, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
+
+// ========================================================================= //
+// 1. INPUTS - PARAMÈTRES MODULAIRES
+// ========================================================================= //
+
+grp_crt     = "1. CRT (Candle Range Theory)"
+tf_crt      = input.timeframe("60", "Timeframe CRT", group=grp_crt)
+show_crt    = input.bool(true, "Afficher Range CRT", group=grp_crt)
+
+grp_str     = "2. Structure & Swings"
+tf_str      = input.timeframe("15", "Timeframe Structure", group=grp_str)
+sw_len      = input.int(5, "Longueur Swing", minval=1, group=grp_str)
+show_str    = input.bool(true, "Afficher BOS/CHOCH", group=grp_str)
+
+grp_pi      = "3. Price Interest (PI) / FVG / OB"
+min_fvg     = input.float(2.0, "Taille Min FVG (Pips)", group=grp_pi)
+show_fvg    = input.bool(true, "Afficher FVG", group=grp_pi)
+show_ob     = input.bool(true, "Afficher Order Blocks", group=grp_pi)
+
+grp_pd      = "4. Premium / Discount"
+pd_type     = input.string("CRT Range", "Base P/D", options=["CRT Range", "Swing Range"], group=grp_pd)
+show_pd     = input.bool(true, "Coloration Premium/Discount", group=grp_pd)
+
+grp_risk    = "5. Gestion Du Risque"
+risk_pct    = input.float(1.0, "Risque %", step=0.1, group=grp_risk)
+rr_ratio    = input.float(2.0, "Ratio RR (Take Profit)", step=0.5, group=grp_risk)
+be_type     = input.string("1R", "Break Even Trigger", options=["Off", "1R", "Sweep"], group=grp_risk)
+
+grp_sess    = "6. Sessions"
+use_lond    = input.bool(true, "Session London", group=grp_sess)
+use_ny      = input.bool(true, "Session New York", group=grp_sess)
+
+grp_ui      = "7. Interface & Dashboard"
+show_dash   = input.bool(true, "Afficher Dashboard", group=grp_ui)
+show_labels = input.bool(true, "Afficher Labels Entrée/SL/TP", group=grp_ui)
+
+// ========================================================================= //
+// 2. TYPES & OBJETS - ARCHITECTURE MÉMOIRE
+// ========================================================================= //
+
+type FVG_BoxData
+    box bx
+    bool is_bull
+    float top
+    float bot
+    bool mitigated
+
+type OB_BoxData
+    box bx
+    bool is_bull
+    float top
+    float bot
+    bool mitigated
+
+type CRT_Data
+    bool is_valid
+    bool is_bull
+    float high
+    float low
+    float mid
+    float target
+
+var crt_state = CRT_Data.new(false, false, na, na, na, na)
+var string m15_bias = "NEUTRAL"
+var string setup_state = "NO_CRT"
+
+var array<FVG_BoxData> fvg_array = array.new<FVG_BoxData>()
+var array<OB_BoxData>  ob_array  = array.new<OB_BoxData>()
+
+// ========================================================================= //
+// 3. FONCTIONS UTILITAIRES
+// ========================================================================= //
+
+// Fonction pour récupérer les données MTF sans repaint (décalage de 1 bougie)
+get_tf_data(tf) =>
+    [h, l, c, o] = request.security(syminfo.tickerid, tf, [high, low, close, open], barmerge.gaps_off, barmerge.lookahead_on)
+    [h[1], l[1], c[1], o[1]]
+
+// Sessions
+is_session_active() =>
+    t = time(timeframe.period, "0800-1200:" + (use_lond ? "1" : "0") + ";1300-1700:" + (use_ny ? "1" : "0"))
+    not na(t)
+
+// ========================================================================= //
+// 4. LOGIQUE H1 - CRT (CANDLE RANGE THEORY)
+// ========================================================================= //
+
+[h1_h, h1_l, h1_c, h1_o] = get_tf_data(tf_crt)
+
+if not na(h1_h) and barstate.isconfirmed
+    // CRT : Bougie actuelle (clôturée) dans le range de la bougie précédente
+    is_crt_bull = h1_c > h1_o and h1_h < h1_h[1] and h1_l > h1_l[1]
+    is_crt_bear = h1_c < h1_o and h1_h < h1_h[1] and h1_l > h1_l[1]
+    
+    if is_crt_bull
+        crt_state := CRT_Data.new(true, true, h1_h[1], h1_l[1], math.avg(h1_h[1], h1_l[1]), h1_h[1] + (h1_h[1] - h1_l[1]))
+        setup_state := "CRT_VALID"
+    else if is_crt_bear
+        crt_state := CRT_Data.new(true, false, h1_h[1], h1_l[1], math.avg(h1_h[1], h1_l[1]), h1_l[1] - (h1_h[1] - h1_l[1]))
+        setup_state := "CRT_VALID"
+    else
+        crt_state := CRT_Data.new(false, false, na, na, na, na)
+        setup_state := "NO_CRT"
+
+// Affichage CRT
+if show_crt and crt_state.is_valid and not na(crt_state.high)
+    var box crt_box = na
+    if not na(crt_box)
+        box.delete(crt_box)
+    crt_box := box.new(bar_index - 1, crt_state.high, bar_index, crt_state.low, border_color=crt_state.is_bull ? color.new(#089981, 20) : color.new(#f23645, 20), bgcolor=crt_state.is_bull ? color.new(#089981, 85) : color.new(#f23645, 85))
+    line.new(bar_index - 1, crt_state.mid, bar_index, crt_state.mid, color=color.new(color.white, 50), style=line.style_dotted)
+
+// ========================================================================= //
+// 5. LOGIQUE M15 - STRUCTURE & SWINGS
+// ========================================================================= //
+
+[h15_h, h15_l, h15_c] = get_tf_data(tf_str)
+
+// Détection Swings M15
+pivot_high = ta.pivothigh(h15_h, sw_len, sw_len)
+pivot_low  = ta.pivotlow(h15_l, sw_len, sw_len)
+
+var float last_swing_high = na
+var float last_swing_low  = na
+
+if not na(pivot_high)
+    last_swing_high := pivot_high
+if not na(pivot_low)
+    last_swing_low := pivot_low
+
+// BOS / CHOCH Logic
+if not na(h15_c) and barstate.isconfirmed
+    if crt_state.is_valid
+        if crt_state.is_bull
+            if h15_c > last_swing_high
+                m15_bias := "BULL"
+                setup_state := "STRUCTURE_VALID"
+        else
+            if h15_c < last_swing_low
+                m15_bias := "BEAR"
+                setup_state := "STRUCTURE_VALID"
+
+// Affichage Structure
+if show_str and not na(pivot_high)
+    label.new(bar_index - sw_len, pivot_high, "SH", style=label.style_label_down, color=color.new(#f23645, 50), textcolor=color.white, size=size.tiny)
+if show_str and not na(pivot_low)
+    label.new(bar_index - sw_len, pivot_low, "SL", style=label.style_label_up, color=color.new(#089981, 50), textcolor=color.white, size=size.tiny)
+
+// ========================================================================= //
+// 6. MOTEUR PI - FVG & ORDER BLOCKS
+// ========================================================================= //
+
+// --- FVG ---
+fvg_top    = low[0] < high[2] ? high[2] : na
+fvg_bot    = high[0] > low[2] ? low[2] : na
+fvg_size   = fvg_top - fvg_bot
+is_fvg_bull = close > open and close[1] > open[1] and fvg_top > fvg_bot and (fvg_size / syminfo.mintick) > min_fvg
+is_fvg_bear = close < open and close[1] < open[1] and fvg_top > fvg_bot and (fvg_size / syminfo.mintick) > min_fvg
+
+if barstate.isconfirmed and (is_fvg_bull or is_fvg_bear)
+    bx = box.new(bar_index[1], fvg_top, bar_index + 20, fvg_bot, border_color=is_fvg_bull ? color.new(#089981, 70) : color.new(#f23645, 70), bgcolor=is_fvg_bull ? color.new(#089981, 90) : color.new(#f23645, 90))
+    array.push(fvg_array, FVG_BoxData.new(bx, is_fvg_bull, fvg_top, fvg_bot, false))
+
+// Mitigation FVG
+if array.size(fvg_array) > 0 and barstate.isconfirmed
+    for i = array.size(fvg_array) - 1 to 0
+        fvg_obj = array.get(fvg_array, i)
+        if not fvg_obj.mitigated
+            if (fvg_obj.is_bull and close < fvg_obj.bot) or (not fvg_obj.is_bull and close > fvg_obj.top)
+                fvg_obj.mitigated := true
+                box.set_bgcolor(fvg_obj.bx, color.new(color.gray, 95))
+                box.set_border_color(fvg_obj.bx, color.new(color.gray, 95))
+
+// --- ORDER BLOCKS ---
+ob_top = close[1]
+ob_bot = open[1]
+is_ob_bull = close > open and open[1] > close[1] and low <= ob_bot
+is_ob_bear = close < open and close[1] > open[1] and high >= ob_top
+
+if barstate.isconfirmed and (is_ob_bull or is_ob_bear)
+    bx = box.new(bar_index[1], ob_top, bar_index + 20, ob_bot, border_color=is_ob_bull ? color.new(#089981, 50) : color.new(#f23645, 50), bgcolor=is_ob_bull ? color.new(#089981, 85) : color.new(#f23645, 85))
+    array.push(ob_array, OB_BoxData.new(bx, is_ob_bull, ob_top, ob_bot, false))
+
+// Mitigation OB
+if array.size(ob_array) > 0 and barstate.isconfirmed
+    for i = array.size(ob_array) - 1 to 0
+        ob_obj = array.get(ob_array, i)
+        if not ob_obj.mitigated
+            if (ob_obj.is_bull and close < ob_obj.bot) or (not ob_obj.is_bull and close > ob_obj.top)
+                ob_obj.mitigated := true
+                box.set_bgcolor(ob_obj.bx, color.new(color.gray, 95))
+
+// ========================================================================= //
+// 7. PREMIUM & DISCOUNT
+// ========================================================================= //
+
+pd_high = pd_type == "CRT Range" ? crt_state.high : last_swing_high
+pd_low  = pd_type == "CRT Range" ? crt_state.low  : last_swing_low
+pd_mid  = na(pd_high) or na(pd_low) ? na : math.avg(pd_high, pd_low)
+
+is_discount = not na(pd_mid) ? close < pd_mid : false
+is_premium  = not na(pd_mid) ? close > pd_mid : false
+
+if show_pd and not na(pd_mid) and crt_state.is_valid
+    bgcolor(is_discount ? color.new(#089981, 95) : is_premium ? color.new(#f23645, 95) : na)
+
+// ========================================================================= //
+// 8. FILTRE VOLATILITÉ (ATR & DISPLACEMENT)
+// ========================================================================= //
+
+atr_val = ta.atr(14)
+vol_filter = atr_val > ta.sma(atr_val, 50) // Volatilité supérieure à la moyenne
+
+// ========================================================================= //
+// 9. LOGIQUE D'ENTRÉE M1 - SNIPER
+// ========================================================================= //
+
+// Vérification entrée dans PI (FVG ou OB non mitigé)
+in_bull_pi() =>
+    res = false
+    if array.size(fvg_array) > 0
+        for i = array.size(fvg_array) - 1 to 0
+            f = array.get(fvg_array, i)
+            if f.is_bull and not f.mitigated and close >= f.bot and close <= f.top
+                res := true
+                break
+    if not res and array.size(ob_array) > 0
+        for i = array.size(ob_array) - 1 to 0
+            o = array.get(ob_array, i)
+            if o.is_bull and not o.mitigated and close >= o.bot and close <= o.top
+                res := true
+                break
+    res
+
+in_bear_pi() =>
+    res = false
+    if array.size(fvg_array) > 0
+        for i = array.size(fvg_array) - 1 to 0
+            f = array.get(fvg_array, i)
+            if not f.is_bull and not f.mitigated and close >= f.bot and close <= f.top
+                res := true
+                break
+    if not res and array.size(ob_array) > 0
+        for i = array.size(ob_array) - 1 to 0
+            o = array.get(ob_array, i)
+            if not o.is_bull and not o.mitigated and close >= o.bot and close <= o.top
+                res := true
+                break
+    res
+
+// Impulsion Institutionnelle (Micro Displacement)
+imp_bull = close > open and (close - open) > atr_val * 0.5
+imp_bear = close < open and (open - close) > atr_val * 0.5
+
+// --- CONDITIONS LONG ---
+long_cond = crt_state.is_valid and crt_state.is_bull and m15_bias == "BULL" and is_discount and in_bull_pi() and imp_bull and vol_filter and is_session_active()
+
+// --- CONDITIONS SHORT ---
+short_cond = crt_state.is_valid and not crt_state.is_bull and m15_bias == "BEAR" and is_premium and in_bear_pi() and imp_bear and vol_filter and is_session_active()
+
+// ========================================================================= //
+// 10. EXÉCUTION, SL, TP & BREAK EVEN
+// ========================================================================= //
+
+var float sl_long = na
+var float sl_short = na
+
+if long_cond and strategy.position_size == 0
+    sl := close < crt_state.low ? close - atr_val : crt_state.low // Derrière liquidité ou CRT
+    tp := close + ((close - sl) * rr_ratio)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=sl, limit=tp)
+    if show_labels
+        label.new(bar_index, close, "🎯 BUY", style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.normal)
+        label.new(bar_index, sl, "SL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+        label.new(bar_index, tp, "TP", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+    setup_state := "IN_TRADE"
+
+if short_cond and strategy.position_size == 0
+    sl := close > crt_state.high ? close + atr_val : crt_state.high
+    tp := close - ((sl - close) * rr_ratio)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=sl, limit=tp)
+    if show_labels
+        label.new(bar_index, close, "🎯 SELL", style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.normal)
+        label.new(bar_index, sl, "SL", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.tiny)
+        label.new(bar_index, tp, "TP", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.tiny)
+    setup_state := "IN_TRADE"
+
+// --- BREAK EVEN ---
+if be_type != "Off" and strategy.position_size != 0
+    if strategy.position_size > 0
+        float entry_p = strategy.position_avg_price
+        float risk = entry_p - sl_long
+        if (be_type == "1R" and high >= entry_p + risk) or (be_type == "Sweep" and high >= last_swing_high)
+            strategy.exit("BE Long", "Long", stop=entry_p + syminfo.mintick * 5)
+    if strategy.position_size < 0
+        float entry_p = strategy.position_avg_price
+        float risk = sl_short - entry_p
+        if (be_type == "1R" and low <= entry_p - risk) or (be_type == "Sweep" and low <= last_swing_low)
+            strategy.exit("BE Short", "Short", stop=entry_p - syminfo.mintick * 5)
+
+// ========================================================================= //
+// 11. ALERTES
+// ========================================================================= //
+
+alertcondition(long_cond, title="BUY SIGNAL", message="ICT Sniper: BUY SIGNAL M1")
+alertcondition(short_cond, title="SELL SIGNAL", message="ICT Sniper: SELL SIGNAL M1")
+alertcondition(crt_state.is_valid and setup_state=="CRT_VALID", title="CRT DETECTED", message="ICT Sniper: New CRT Range Detected")
+alertcondition(m15_bias!="NEUTRAL" and setup_state=="STRUCTURE_VALID", title="SWING CONFIRMED", message="ICT Sniper: M15 Structure Confirmed")
+
+// ========================================================================= //
+// 12. DASHBOARD PREMIUM
+// ========================================================================= //
+
+if show_dash
+    var table dash = table.new(position.top_right, 2, 7, border_width=1, border_color=color.new(color.white, 80), frame_color=color.new(color.white, 80), frame_width=1)
+    
+    table.cell(dash, 0, 0, "ICT M1 SNIPER", text_color=color.white, bgcolor=color.new(#1e222d, 10), text_size=size.normal)
+    table.cell(dash, 1, 0, setup_state, text_color=setup_state=="IN_TRADE"?color.gold:color.white, bgcolor=color.new(#1e222d, 10), text_size=size.normal)
+    
+    table.cell(dash, 0, 1, "CRT H1", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 1, crt_state.is_valid ? (crt_state.is_bull ? "BULL ✓" : "BEAR ✓") : "NONE ✗", text_color=crt_state.is_valid ? color.white : color.red, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    
+    table.cell(dash, 0, 2, "STRUCT M15", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 2, m15_bias, text_color=m15_bias=="BULL"?#089981:m15_bias=="BEAR"?#f23645:color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    
+    table.cell(dash, 0, 3, "ZONE", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 3, is_discount ? "DISCOUNT ↗" : is_premium ? "PREMIUM ↘" : "EQUILIBRIUM", text_color=is_discount ? #089981 : is_premium ? #f23645 : color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    
+    table.cell(dash, 0, 4, "SESSION", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 4, is_session_active() ? "ACTIVE ●" : "OFF ○", text_color=is_session_active() ? #089981 : color.red, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    
+    table.cell(dash, 0, 5, "RR TARGET", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 5, "1:" + str.tostring(rr_ratio), text_color=color.white, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    
+    table.cell(dash, 0, 6, "VOLATILITY", text_color=color.gray, bgcolor=color.new(#1e222d, 20), text_size=size.small)
+    table.cell(dash, 1, 6, vol_filter ? "HIGH ◉" : "LOW ○", text_color=vol_filter ? #089981 : color.red, bgcolor=color.new(#1e222d, 20), text_size=size.small)

@@ -1,0 +1,302 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// BRUCE STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: Mechanical Framework with FVG & Sweeps
+// Platform: TradingView (Pine Script v6)
+// Author: Alexandre Albert Ndour
+// Version: 1.0.0
+// License: MIT
+//
+strategy("Brucetrade Mechanical Framework | FVG & Sweeps", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, calc_on_every_tick=false, default_qty_type=strategy.percent_of_equity, default_qty_value=2)
+
+// ========================================================================= //
+// 1. INPUTS - CONFIGURATION MODULAIRE
+// ========================================================================= //
+
+grp_htf = "1. HTF BIAS (Daily)"
+htf_tf  = input.timeframe("D", "Timeframe HTF", group=grp_htf)
+
+grp_mtf = "2. MOMENTUM (H1/H4)"
+mtf_tf  = input.timeframe("60", "Timeframe Momentum", group=grp_mtf)
+
+grp_ltf = "3. STRUCTURE & LIQUIDITY (LTF)"
+sw_len  = input.int(5, "Swing Lookback", group=grp_ltf)
+liq_tol = input.float(0.5, "Equal Highs/Lows Tolerance (Pips)", group=grp_ltf)
+
+grp_fvg = "4. FAIR VALUE GAPS"
+min_fvg = input.float(2.0, "Taille Min FVG (Pips)", group=grp_fvg)
+show_fvg = input.bool(true, "Afficher FVG", group=grp_fvg)
+show_ifvg = input.bool(true, "Afficher IFVG", group=grp_fvg)
+
+grp_risk = "5. RISK MANAGEMENT"
+risk_pct = input.float(1.0, "Risque par Trade (%)", step=0.1, group=grp_risk)
+rr_ratio = input.float(3.0, "Ratio Risque/Rendement", step=0.5, group=grp_risk)
+sl_type  = input.string("FVG", "Type Stop Loss", options=["FVG", "Swing", "Sweep"], group=grp_risk)
+
+grp_sess = "6. SESSIONS"
+use_ny   = input.bool(true, "Session New York", group=grp_sess)
+use_ldn  = input.bool(true, "Session London", group=grp_sess)
+use_asy  = input.bool(false, "Session Asia", group=grp_sess)
+
+grp_ui   = "7. INTERFACE & DASHBOARD"
+show_dash = input.bool(true, "Afficher Dashboard", group=grp_ui)
+show_lbl  = input.bool(true, "Afficher Labels Entrée", group=grp_ui)
+
+// ========================================================================= //
+// 2. TYPES & STRUCTURES DE DONNÉES (OPTIMISATION MÉMOIRE)
+// ========================================================================= //
+
+type FVG_Data
+    box bx
+    bool is_bull
+    float top
+    float bot
+    bool mitigated
+    bool inverted
+
+type Liq_Data
+    line ln
+    float price
+    bool is_bsl   // Buy Side Liquidity
+    bool swept
+
+var array<FVG_Data> fvg_array = array.new<FVG_Data>()
+var array<Liq_Data> liq_array = array.new<Liq_Data>()
+
+// ========================================================================= //
+// 3. FONCTIONS UTILITAIRES MTF (ANTI-REPAINT ABSOLU)
+// ========================================================================= //
+
+// Récupère les données cloturées des UT supérieures. Décalage de 1 bougie + lookahead_on = Zéro Repaint
+get_htf_data() =>
+    [h, l, c] = request.security(syminfo.tickerid, htf_tf, [high, low, close], barmerge.gaps_off, barmerge.lookahead_on)
+    [h[1], l[1], c[1]]
+
+get_mtf_data() =>
+    [h, l, c] = request.security(syminfo.tickerid, mtf_tf, [high, low, close], barmerge.gaps_off, barmerge.lookahead_on)
+    [h[1], l[1], c[1]]
+
+// Vérification Session
+is_session_active() =>
+    sess_str = (use_ldn ? "0800-1200:" : "") + (use_ny ? "1300-1700:" : "") + (use_asy ? "0000-0400:" : "")
+    not na(time(timeframe.period, sess_str))
+
+// ========================================================================= //
+// 4. MOTEUR FVG & IFVG
+// ========================================================================= //
+
+// Détection FVG standard
+fvg_top    = low < high[2] ? high[2] : na
+fvg_bot    = high > low[2] ? low[2] : na
+fvg_size   = fvg_top - fvg_bot
+is_fvg_bull = close > open and close[1] > open[1] and fvg_top > fvg_bot and (fvg_size / syminfo.mintick) > min_fvg
+is_fvg_bear = close < open and close[1] < open[1] and fvg_top > fvg_bot and (fvg_size / syminfo.mintick) > min_fvg
+
+if barstate.isconfirmed and (is_fvg_bull or is_fvg_bear)
+    bx = box.new(bar_index[1], fvg_top, bar_index + 20, fvg_bot, border_color=is_fvg_bull ? color.new(#089981, 70) : color.new(#f23645, 70), bgcolor=is_fvg_bull ? color.new(#089981, 90) : color.new(#f23645, 90))
+    array.push(fvg_array, FVG_Data.new(bx, is_fvg_bull, fvg_top, fvg_bot, false, false))
+
+// Mise à jour Mitigation & IFVG
+if array.size(fvg_array) > 0 and barstate.isconfirmed
+    for i = array.size(fvg_array) - 1 to 0
+        f = array.get(fvg_array, i)
+        if not f.mitigated
+            // Mitigation : le prix cloture dans le FVG
+            if (f.is_bull and close < f.top and close > f.bot) or (not f.is_bull and close < f.top and close > f.bot)
+                f.mitigated := true
+                box.set_bgcolor(f.bx, color.new(color.gray, 95))
+                box.set_border_color(f.bx, color.new(color.gray, 95))
+            // IFVG (Inversion) : le prix cloture complètement à travers le FVG
+            else if (f.is_bull and close < f.bot) or (not f.is_bull and close > f.top)
+                f.inverted := true
+                if show_ifvg
+                    box.set_bgcolor(f.bx, f.is_bull ? color.new(#f23645, 85) : color.new(#089981, 85))
+                    box.set_border_color(f.bx, f.is_bull ? color.new(#f23645, 50) : color.new(#089981, 50))
+
+// ========================================================================= //
+// 5. LIQUIDITÉ & SWEEPS
+// ========================================================================= //
+
+pivot_high = ta.pivothigh(high, sw_len, sw_len)
+pivot_low  = ta.pivotlow(low, sw_len, sw_len)
+
+// Enregistrement des pools de liquidité
+if not na(pivot_high)
+    ln = line.new(bar_index[sw_len], pivot_high, bar_index, pivot_high, color=color.new(#f23645, 70), style=line.style_dashed)
+    array.push(liq_array, Liq_Data.new(ln, pivot_high, true, false))
+
+if not na(pivot_low)
+    ln = line.new(bar_index[sw_len], pivot_low, bar_index, pivot_low, color=color.new(#089981, 70), style=line.style_dashed)
+    array.push(liq_array, Liq_Data.new(ln, pivot_low, false, false))
+
+// Détection Sweeps
+var string last_sweep = "NONE"
+if array.size(liq_array) > 0 and barstate.isconfirmed
+    for i = array.size(liq_array) - 1 to 0
+        lq = array.get(liq_array, i)
+        if not lq.swept
+            // Sweep BSL (Highs)
+            if lq.is_bsl and high > lq.price and close < lq.price
+                lq.swept := true
+                line.set_style(lq.ln, line.style_solid)
+                line.set_color(lq.ln, color.new(#f23645, 0))
+                last_sweep := "BSL"
+            // Sweep SSL (Lows)
+            else if not lq.is_bsl and low < lq.price and close > lq.price
+                lq.swept := true
+                line.set_style(lq.ln, line.style_solid)
+                line.set_color(lq.ln, color.new(#089981, 0))
+                last_sweep := "SSL"
+
+// ========================================================================= //
+// 6. LOGIQUE HTF BIAS (DAILY)
+// ========================================================================= //
+
+[htf_h, htf_l, htf_c] = get_htf_data()
+var string htf_bias = "NEUTRAL"
+
+if not na(htf_c) and barstate.isconfirmed
+    // Biais Baissier : Sweep des Highs HTF + Clôture forte baissière (Displacement)
+    if high > htf_h[1] and close < htf_l
+        htf_bias := "BEAR"
+    // Biais Haussier : Sweep des Lows HTF + Clôture forte haussière (Displacement)
+    else if low < htf_l[1] and close > htf_h
+        htf_bias := "BULL"
+    // IFVG HTF : Si biais baissier mais qu'on clôture au dessus du range, inversion
+    else if htf_bias == "BEAR" and close > htf_h
+        htf_bias := "BULL"
+    else if htf_bias == "BULL" and close < htf_l
+        htf_bias := "BEAR"
+
+// ========================================================================= //
+// 7. MOMENTUM MTF
+// ========================================================================= //
+
+[mtf_h, mtf_l, mtf_c] = get_mtf_data()
+var string mtf_momentum = "WEAK"
+
+if not na(mtf_c) and barstate.isconfirmed
+    // Déplacement impulsif (Displacement) sur le MTF
+    mtf_range = mtf_h - mtf_l
+    mtf_body  = math.abs(mtf_c - mtf_c[1])
+    if mtf_body > mtf_range * 0.6 // Bougie expulsive
+        mtf_momentum := mtf_c > mtf_c[1] ? "BULL" : "BEAR"
+    else
+        mtf_momentum := "WEAK"
+
+// ========================================================================= //
+// 8. ENTRÉES LTF - MÉCANIQUE SNIPER
+// ========================================================================= //
+
+// Vérification entrée dans FVG actif
+in_bull_fvg() =>
+    res = false
+    if array.size(fvg_array) > 0
+        for i = array.size(fvg_array) - 1 to 0
+            f = array.get(fvg_array, i)
+            if f.is_bull and not f.mitigated and not f.inverted and low <= f.top and low >= f.bot
+                res := true
+                break
+    res
+
+in_bear_fvg() =>
+    res = false
+    if array.size(fvg_array) > 0
+        for i = array.size(fvg_array) - 1 to 0
+            f = array.get(fvg_array, i)
+            if not f.is_bull and not f.mitigated and not f.inverted and high >= f.bot and high <= f.top
+                res := true
+                break
+    res
+
+// Expansion Candle LTF (Bougie institutionnelle)
+atr_val = ta.atr(14)
+is_exp_bull = close > open and (close - open) > atr_val * 1.5
+is_exp_bear = close < open and (open - close) > atr_val * 1.5
+
+// --- CONDITION BUY ---
+// 1. HTF BULL + MTF BULL/WEEK + Sweep SSL sur LTF + Entrée dans FVG Bull + Expansion Bull
+cond_buy = htf_bias == "BULL" and (mtf_momentum == "BULL" or mtf_momentum == "WEAK") and last_sweep == "SSL" and in_bull_fvg() and is_exp_bull and is_session_active()
+
+// --- CONDITION SELL ---
+// 1. HTF BEAR + MTF BEAR/WEAK + Sweep BSL sur LTF + Entrée dans FVG Bear + Expansion Bear
+cond_sell = htf_bias == "BEAR" and (mtf_momentum == "BEAR" or mtf_momentum == "WEAK") and last_sweep == "BSL" and in_bear_fvg() and is_exp_bear and is_session_active()
+
+// ========================================================================= //
+// 9. EXÉCUTION, SL & TP
+// ========================================================================= //
+
+var float trade_sl = na
+var float trade_tp = na
+
+if strategy.position_size == 0
+    if cond_buy
+        sl = sl_type == "FVG" ? low - syminfo.mintick : (sl_type == "Swing" ? ta.lowest(low, sw_len) : low[1])
+        tp = close + ((close - sl) * rr_ratio)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", "Long", stop=sl, limit=tp)
+        trade_sl := sl
+        trade_tp := tp
+        if show_lbl
+            label.new(bar_index, low, "🟢 BUY", style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.normal)
+            label.new(bar_index, sl, "SL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+            label.new(bar_index, tp, "TP", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+
+    if cond_sell
+        sl = sl_type == "FVG" ? high + syminfo.mintick : (sl_type == "Swing" ? ta.highest(high, sw_len) : high[1])
+        tp = close - ((sl - close) * rr_ratio)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", "Short", stop=sl, limit=tp)
+        trade_sl := sl
+        trade_tp := tp
+        if show_lbl
+            label.new(bar_index, high, "🔴 SELL", style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.normal)
+            label.new(bar_index, sl, "SL", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.tiny)
+            label.new(bar_index, tp, "TP", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.tiny)
+
+// ========================================================================= //
+// 10. ALERTES WEBHOOK
+// ========================================================================= //
+
+alertcondition(cond_buy, title="BUY SIGNAL", message="Brucetrade Framework: BUY SIGNAL")
+alertcondition(cond_sell, title="SELL SIGNAL", message="Brucetrade Framework: SELL SIGNAL")
+alertcondition(htf_bias != htf_bias[1], title="HTF BIAS CHANGE", message="Brucetrade Framework: HTF BIAS CHANGE")
+alertcondition(last_sweep != last_sweep[1], title="SWEEP DETECTED", message="Brucetrade Framework: LIQUIDITY SWEEP")
+
+// ========================================================================= //
+// 11. DASHBOARD PREMIUM
+// ========================================================================= //
+
+if show_dash
+    var table dash = table.new(position.top_right, 2, 8, border_width=1, border_color=color.new(color.white, 80), frame_color=color.new(color.white, 80), frame_width=1)
+    
+    // Style
+    bg_dark = color.new(#131722, 10)
+    bg_head = color.new(#1e222d, 0)
+    
+    table.cell(dash, 0, 0, "BRUCETRADE FRAMEWORK", text_color=color.white, bgcolor=bg_head, text_size=size.normal)
+    table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=bg_head, text_size=size.normal)
+    
+    table.cell(dash, 0, 1, "HTF BIAS", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 1, htf_bias, text_color=htf_bias=="BULL"?#089981:htf_bias=="BEAR"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 2, "MTF MOMENTUM", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 2, mtf_momentum, text_color=mtf_momentum=="BULL"?#089981:mtf_momentum=="BEAR"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 3, "LAST SWEEP", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 3, last_sweep, text_color=last_sweep=="SSL"?#089981:last_sweep=="BSL"?#f23645:color.gray, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "SESSION", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 4, is_session_active() ? "ACTIVE ●" : "OFF ○", text_color=is_session_active() ? #089981 : color.red, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 5, "TRADE", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    trade_state = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    table.cell(dash, 1, 5, trade_state, text_color=trade_state=="LONG"?#089981:trade_state=="SHORT"?#f23645:color.white, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 6, "R:R RATIO", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 6, "1:" + str.tostring(rr_ratio), text_color=color.white, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 7, "WIN RATE", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    wr = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : na
+    table.cell(dash, 1, 7, str.tostring(wr, "#.##") + "%", text_color=wr>50?#089981:color.red, bgcolor=bg_dark, text_size=size.small)
