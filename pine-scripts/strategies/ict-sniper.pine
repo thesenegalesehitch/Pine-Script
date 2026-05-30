@@ -1,0 +1,158 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROP FIRM ICT SNIPER STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy: ICT Sniper with Prop Firm Risk Management
+// Platform: TradingView (Pine Script v6)
+// Author: Alexandre Albert Ndour
+// Version: 1.0.0
+// License: MIT
+//
+// DESCRIPTION:
+// Prop firm survival mode strategy using ICT concepts with strict risk management.
+// Features daily drawdown protection, phase-based risk scaling, and sniper entries.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+strategy("Prop Firm ICT Sniper | Survival Mode", overlay=true, max_lines_count=150, max_labels_count=150, calc_on_every_tick=false, default_qty_type=strategy.cash)
+
+// ========================================================================= //
+// 1. INPUTS - PROP FIRM RISK MANAGEMENT
+// ========================================================================= //
+
+grp_risk   = "⚙️ PROP FIRM RISK PARAMETERS"
+phase      = input.string("Phase 1", "Phase Actuelle", options=["Phase 1", "Phase 2"], group=grp_risk)
+init_cap   = input.float(1000, "Capital Initial ($)", group=grp_risk)
+risk_ph1   = input.float(1.0, "Risque % Trade (Phase 1)", step=0.1, group=grp_risk)
+risk_ph2   = input.float(0.5, "Risque % Trade (Phase 2)", step=0.1, group=grp_risk)
+rr_ratio   = input.float(3.0, "Ratio RR", step=0.5, group=grp_risk)
+max_daily_loss_ph1 = input.float(5.0, "Max Daily Loss % (Phase 1)", group=grp_risk)
+max_daily_loss_ph2 = input.float(2.0, "Max Daily Loss % (Phase 2)", group=grp_risk)
+
+grp_setup  = "🎯 SNIPER SETUP (ICT)"
+sensitivity= input.int(5, "Sensibilité Swing/Sweep", group=grp_setup)
+min_fvg_pips=input.float(3.0, "Taille Min FVG (Pips)", group=grp_setup)
+
+// ========================================================================= //
+// 2. DYNAMIC RISK CALCULATOR
+// ========================================================================= //
+
+current_risk_pct = phase == "Phase 1" ? risk_ph1 : risk_ph2
+max_daily_pct    = phase == "Phase 1" ? max_daily_loss_ph1 : max_daily_loss_ph2
+
+risk_amount = (strategy.equity * current_risk_pct) / 100
+daily_loss_limit = (init_cap * max_daily_pct) / 100
+
+// Calcul de la perte journalière actuelle (Reset à minuit)
+var float daily_pnl = 0
+if dayofmonth != dayofmonth[1]
+    daily_pnl := 0
+daily_pnl := daily_pnl + (strategy.netprofit - strategy.netprofit[1])
+
+is_daily_limit_hit = daily_pnl <= -daily_loss_limit
+
+// ========================================================================= //
+// 3. MARKET STRUCTURE & LIQUIDITY (SWEEPS)
+// ========================================================================= //
+
+pivot_h = ta.pivothigh(high, sensitivity, sensitivity)
+pivot_l = ta.pivotlow(low, sensitivity, sensitivity)
+
+var string last_sweep = "NONE"
+
+if not na(pivot_h)
+    line.new(bar_index[sensitivity], pivot_h, bar_index, pivot_h, color=color.new(color.red, 70), style=line.style_dotted)
+if not na(pivot_l)
+    line.new(bar_index[sensitivity], pivot_l, bar_index, pivot_l, color=color.new(color.green, 70), style=line.style_dotted)
+
+if not na(pivot_h) and high > pivot_h and close < pivot_h
+    last_sweep := "BSL"
+if not na(pivot_l) and low < pivot_l and close > pivot_l
+    last_sweep := "SSL"
+
+// ========================================================================= //
+// 4. DISPLACEMENT & FAIR VALUE GAPS (FVG)
+// ========================================================================= //
+
+fvg_top = low < high[2] ? high[2] : na
+fvg_bot = high > low[2] ? low[2] : na
+fvg_size = (fvg_top - fvg_bot) / syminfo.mintick
+
+is_fvg_bull = close > open and (close - open) > ta.atr(14)*1.5 and fvg_size > min_fvg_pips
+is_fvg_bear = close < open and (open - close) > ta.atr(14)*1.5 and fvg_size > min_fvg_pips
+
+var float bull_fvg_top = na
+var float bull_fvg_bot = na
+var float bear_fvg_top = na
+var float bear_fvg_bot = na
+
+if barstate.isconfirmed and is_fvg_bull
+    bull_fvg_top := fvg_top
+    bull_fvg_bot := fvg_bot
+    box.new(bar_index[1], fvg_top, bar_index+10, fvg_bot, border_color=color.new(#089981, 50), bgcolor=color.new(#089981, 85))
+    
+if barstate.isconfirmed and is_fvg_bear
+    bear_fvg_top := fvg_top
+    bear_fvg_bot := fvg_bot
+    box.new(bar_index[1], fvg_top, bar_index+10, fvg_bot, border_color=color.new(#f23645, 50), bgcolor=color.new(#f23645, 85))
+
+// ========================================================================= //
+// 5. SNIPER ENTRY LOGIC
+// ========================================================================= //
+
+// Condition A+ : Sweep BSL + FVG Bearish => SELL (Risk First)
+cond_sell = last_sweep == "BSL" and is_fvg_bear and high <= bear_fvg_top and high >= bear_fvg_bot
+
+// Condition A+ : Sweep SSL + FVG Bullish => BUY
+cond_buy  = last_sweep == "SSL" and is_fvg_bull and low >= bull_fvg_bot and low <= bull_fvg_top
+
+// ========================================================================= //
+// 6. EXECUTION & POSITION SIZING
+// ========================================================================= //
+
+if not is_daily_limit_hit
+    if cond_buy
+        sl_dist = close - bull_fvg_bot + syminfo.mintick*5
+        tp_dist = sl_dist * rr_ratio
+        
+        // Calcul taille position dynamique
+        qty = risk_amount / sl_dist
+        
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Exit Long", "Long", stop=close - sl_dist, limit=close + tp_dist)
+
+    if cond_sell
+        sl_dist = bear_fvg_top - close + syminfo.mintick*5
+        tp_dist = sl_dist * rr_ratio
+        
+        qty = risk_amount / sl_dist
+        
+        strategy.entry("Short", strategy.short, qty=qty)
+        strategy.exit("Exit Short", "Short", stop=close + sl_dist, limit=close - tp_dist)
+
+// ========================================================================= //
+// 7. PREMIUM SURVIVAL DASHBOARD
+// ========================================================================= //
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1, border_color=color.new(color.white, 80), frame_color=color.new(color.white, 80), frame_width=1)
+
+if barstate.islast
+    bg_dark = color.new(#131722, 10)
+    bg_head = color.new(#1e222d, 0)
+    
+    table.cell(dash, 0, 0, "PROP FIRM SNIPER", text_color=color.white, bgcolor=bg_head, text_size=size.normal)
+    table.cell(dash, 1, 0, phase, text_color=phase=="Phase 1"?#089981:#f23645, bgcolor=bg_head, text_size=size.normal)
+    
+    table.cell(dash, 0, 1, "Risque Trade", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(current_risk_pct)+"% ($"+str.tostring(risk_amount,"#.##")+")", text_color=color.white, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 2, "Perte Jour", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 2, "$"+str.tostring(daily_pnl,"#.#"), text_color=daily_pnl<0?color.red:#089981, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 3, "Limite Jour", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 3, "-$"+str.tostring(daily_loss_limit,"#.#"), text_color=color.red, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "Status", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 4, is_daily_limit_hit ? "🚫 DAILY LIMIT HIT" : "🟢 ACTIVE", text_color=is_daily_limit_hit?color.red:#089981, bgcolor=bg_dark, text_size=size.small)
+    
+    table.cell(dash, 0, 5, "R:R Cible", text_color=color.gray, bgcolor=bg_dark, text_size=size.small)
+    table.cell(dash, 1, 5, "1:"+str.tostring(rr_ratio), text_color=color.white, bgcolor=bg_dark, text_size=size.small)
