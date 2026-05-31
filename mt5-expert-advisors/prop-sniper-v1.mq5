@@ -21,7 +21,7 @@ input double   Phase2_MaxDD        = 50.0;      // Max Global DD Phase 2 ($)
 
 //--- INPUTS STRATÉGIE
 input double   Phase1_RiskPct      = 2.5;       // Risque Phase 1 (%)
-input double   Phase2_RiskPct      = 0.75;      // Risque Phase 2 (%)
+input double   Phase2_RiskPct      = 0.75;      // Risque Phase 2 (%) - Mode défensif
 input double   RiskRewardRatio     = 3.0;       // Ratio RR (1:3)
 input int      AsianSessionEndHour = 7;         // Heure fin session Asie (Serveur)
 input int      LondonStartHour     = 8;         // Heure début London (Serveur)
