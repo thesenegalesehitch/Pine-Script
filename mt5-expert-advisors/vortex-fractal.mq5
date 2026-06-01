@@ -10,7 +10,7 @@
 CTrade trade;
 
 //--- Inputs (Les Paramètres de la Machine à Sous)
-input double   RiskPercent        = 15.0;      // Risque par trade (%) - Extrême !
+input double   RiskPercent        = 15.0;      // Risque par trade (%) - Extrême ! - Ajusté pour scalping
 input double   TakeProfitMultiplier = 3.0;     // Ratio TP/SL (1:3 minimum)
 input int      DisplacementATR    = 3;         // Force de la bougie d'impulsion (x ATR)
 input int      ATR_Period         = 14;        // Période ATR
