@@ -10,7 +10,7 @@
 CTrade trade;
 
 //--- Inputs (Les Paramètres de l'Attaque)
-input double   RiskPercent        = 25.0;       // Risque par trade (%) - Mode Kamikaze Capitaliste
+input double   RiskPercent        = 25.0;       // Risque par trade (%) - Mode Kamikaze Capitaliste - Ajusté pour volatilité
 input double   RR_Ratio           = 2.5;        // Ratio Risque/Récompense
 input double   ImpulseMultiplier  = 3.0;        // Force de la Fractale (x ATR M1)
 input int      ATR_Period_M1      = 14;         // ATR Calcul
