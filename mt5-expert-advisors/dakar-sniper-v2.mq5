@@ -40,7 +40,7 @@ input double   Phase2_DailyDD      = 20.0;      // Max Daily DD Phase 2 ($)
 input double   Phase2_MaxDD        = 50.0;      // Max Global DD Phase 2 ($)
 
 //--- INPUTS MOTEUR & BROKER
-input double   Phase1_RiskPct      = 2.0;       // Risque Phase 1 (%)
+input double   Phase1_RiskPct      = 2.0;       // Risque Phase 1 (%) - Optimisé pour FTMO
 input double   Phase2_RiskPct      = 0.75;      // Risque Phase 2 (%)
 input double   RiskRewardRatio     = 3.0;       // Ratio RR (1:3)
 input int      BrokerServerOffset  = 2;         // Décalage Horaire Broker (0=GMT, 1=CET, 2=XM Standard)
