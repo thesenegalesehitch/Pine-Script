@@ -45,7 +45,7 @@ input int      InpRSIOversold   = 25;      // RSI Survente
 input double   InpVolumeMult   = 1.3;      // Multiplicateur Volume (confirmation momentum)
 
 input group "=== Gestion du Risque ==="
-input double   InpRiskPercent  = 0.75;     // Risque par trade (%)
+input double   InpRiskPercent  = 0.75;     // Risque par trade (%) - Conservateur
 input double   InpRR_Ratio     = 2.0;      // Ratio Risk:Reward
 input double   InpATRMult      = 1.2;      // Multiplicateur ATR pour SL
 input int      InpATRPeriod    = 10;       // Période ATR
