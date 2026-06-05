@@ -36,7 +36,7 @@ input int      InpATRPeriod = 14;      // Période ATR pour le Stop Loss
 input double   InpATRMult   = 1.5;     // Multiplicateur ATR pour le SL
 
 input group "=== Gestion du Risque ==="
-input double   InpRiskPerTrade = 0.8;  // % de risque par trade (Conseillé: 0.8% pour 5 trades/jour)
+input double   InpRiskPerTrade = 0.8;  // % de risque par trade (Conseillé: 0.8% pour 5 trades/jour) - Sécurisé
 input double   InpRRRatio      = 1.5;  // Ratio Risk/Reward (1:1.5)
 input double   InpDailyLossLimit = 45.0; // Limite de perte journalière en $ (Sécurité pour 50$)
 input double   InpDailyTarget    = 30.0; // Objectif de profit journalier en $
