@@ -26,7 +26,7 @@
 #include <Trade/Trade.mqh>
 CTrade trade;
 
-input double RiskPercent = 1.0;
+input double RiskPercent = 1.0; // Risque par trade (%) - Institutionnel
 input int EMAFast = 50;
 input int EMASlow = 200;
 input int ATRPeriod = 14;
